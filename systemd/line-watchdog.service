@@ -1,0 +1,8 @@
+[Unit]
+Description=LINE process watchdog
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/line-watchdog.sh
+StandardOutput=journal
+StandardError=journal

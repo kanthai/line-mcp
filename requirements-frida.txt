@@ -1,0 +1,3 @@
+# Only needed for CDN token refresh (tools/refresh_token.py)
+frida==17.9.1
+frida-tools
