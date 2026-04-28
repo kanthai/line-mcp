@@ -42,6 +42,12 @@ The CDN auth token (`X-Line-Access`) is captured once via `tools/refresh_token.p
 
 ---
 
+## Verified
+
+Tested and working on **NVIDIA DGX Spark** running **Ubuntu 24.04.4 LTS** (kernel 6.17.0-1014-nvidia, aarch64).
+
+---
+
 ## Requirements
 
 - Linux host (tested on Ubuntu 22.04 / 24.04)
