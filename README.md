@@ -2,7 +2,7 @@
 
 A [Model Context Protocol](https://modelcontextprotocol.io/) server that gives AI assistants read access to your LINE chats — including full E2EE image decryption — directly from the LINE SQLite database running inside a [Waydroid](https://waydroid.io/) Android container.
 
-No LINE API key required. No cloud relay. Everything runs locally on your own machine.
+No LINE API key required. No cloud relay. Everything runs locally on your own machine. Uses the official LINE Android app — no patched APK, no custom client.
 
 ---
 
