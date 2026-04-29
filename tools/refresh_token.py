@@ -82,8 +82,18 @@ def load_bridge(script, name):
 
 
 def main():
+    import subprocess as _sp
     dev = frida.get_device_manager().add_remote_device(f"{FRIDA_HOST}:{FRIDA_PORT}")
-    pid = next(p.pid for p in dev.enumerate_processes() if p.name == "LINE")
+    r = _sp.run(
+        ["sudo", "waydroid", "shell", "--", "sh", "-c",
+         "ps -A | grep '[l]ine.android' | awk '{print $2}'"],
+        capture_output=True, text=True, timeout=15,
+    )
+    pids = [p for p in r.stdout.strip().split() if p.isdigit()]
+    if not pids:
+        print("[!] LINE not running — start LINE first", file=sys.stderr)
+        sys.exit(1)
+    pid = int(pids[0])
     print(f"[*] Attaching to LINE pid={pid}", file=sys.stderr)
 
     session = dev.attach(pid)

@@ -38,7 +38,7 @@ For E2EE media (photos sent with Letter Sealing), LINE caches the decrypted key 
 5. Decrypt: AES-256-CTR(Kenc, IV + b"\x00"*4, C) → plaintext JPEG
 ```
 
-The CDN auth token (`X-Line-Access`) is captured once via `tools/refresh_token.py` (Frida SSL hook) and persisted to `~/.config/line-mcp/auth.json`. It needs re-capturing only when LINE restarts.
+The CDN auth token (`X-Line-Access`) is a session-scoped bearer token (~24–48h) that LINE fetches from its auth server at startup. It is captured via a Frida SSL hook that intercepts the outgoing HTTP/1.1 request to `obs-th.line-apps.com` and persisted to `~/.config/line-mcp/auth.json`. It needs re-capturing only after the token expires or LINE re-registers the device.
 
 ---
 
@@ -112,12 +112,20 @@ pip install -r requirements-frida.txt   # only needed for token refresh
 ### 3. Capture the CDN auth token
 
 ```bash
-python -u tools/refresh_token.py
-# then trigger any LINE network activity in the container
-# token auto-saves to ~/.config/line-mcp/auth.json
+bash tools/refresh-cdn-token.sh
+# restarts LINE, intercepts the CDN request via Frida SSL hook,
+# and auto-saves the token to ~/.config/line-mcp/auth.json
 ```
 
-The token is session-scoped and survives until LINE or Waydroid restarts.
+The token is valid for ~24–48 hours. Re-run this script after the token expires or after LINE re-registers the device. Restarting LINE itself does not rotate the token — the auth server returns the same token until it expires.
+
+> **How it works**: the script force-stops LINE (clearing Glide's in-memory image cache), spawns it fresh via Frida, then navigates to a chat with images. When LINE re-fetches the images from the CDN, the SSL hook captures the `X-Line-Access` header from the outgoing HTTP/1.1 request.
+
+Options:
+```bash
+bash tools/refresh-cdn-token.sh --no-spawn   # attach to already-running LINE (only if just started cold)
+bash tools/refresh-cdn-token.sh --timeout 60 # shorter timeout
+```
 
 ### 4. Wire into your MCP client
 
@@ -226,13 +234,16 @@ The only time a display is needed is `open_chat_and_cache` (last-resort fallback
 ## Project layout
 
 ```
-mcp/server.py              — FastMCP stdio server (20 tools)
-tools/line_db.py           — SQLite read layer + E2EE decrypt pipeline
-tools/refresh_token.py     — Frida SSL hook to capture X-Line-Access token
-tools/decrypt_media.py     — CLI tool: decrypt a blob file given a KM hex string
-tools/line-watchdog.sh     — Keep LINE process running inside Waydroid
-tools/waydroid-watchdog.sh — Keep Waydroid session alive; auto-unfreeze
-setup/                     — One-time setup scripts (01–06)
+mcp/server.py                — FastMCP stdio server (20 tools)
+tools/line_db.py             — SQLite read layer + E2EE decrypt pipeline
+tools/refresh-cdn-token.sh   — One-shot token refresh: spawn LINE, sniff SSL, save token
+tools/refresh_token.py       — Low-level Frida SSL hook (called by refresh-cdn-token.sh)
+tools/decrypt_media.py       — CLI tool: decrypt a blob file given a KM hex string
+tools/start-after-reboot.sh  — Full post-reboot startup: Weston + Waydroid + LINE + token
+tools/line-watchdog.sh       — Keep LINE process running inside Waydroid
+tools/waydroid-watchdog.sh   — Keep Waydroid session alive; auto-unfreeze
+tools/waydroid-storage-fix.sh — Fix Waydroid FUSE emulated storage (run once if needed)
+setup/                       — One-time setup scripts (01–06)
 ```
 
 ---

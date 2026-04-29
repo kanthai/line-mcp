@@ -108,23 +108,15 @@ sleep 5
 # ── 7. Capture CDN token ─────────────────────────────────────────────────────
 
 echo "==> Capturing CDN token"
-PYTHON3=$(sudo -u "${WAYDROID_USER}" which python3 2>/dev/null || which python3 2>/dev/null || true)
-if [[ -z "$PYTHON3" ]]; then
-    echo "  WARNING: python3 not found — run tools/refresh_token.py manually"
+REFRESH_SCRIPT="${SCRIPT_DIR}/refresh-cdn-token.sh"
+if [[ ! -x "$REFRESH_SCRIPT" ]]; then
+    echo "  WARNING: $REFRESH_SCRIPT not found — capture token manually"
 else
-    REFRESH_SCRIPT="${SCRIPT_DIR}/refresh_token.py"
+    # After a reboot LINE just started cold; spawn mode is the default.
     sudo -E -u "${WAYDROID_USER}" \
-        HOME="$USER_HOME" \
-        nohup "$PYTHON3" -u "$REFRESH_SCRIPT" > /tmp/refresh-token.log 2>&1 &
-    echo "  Running in background — waiting up to 30s for token..."
-    for i in $(seq 1 15); do
-        sleep 2
-        if [[ -f "${USER_HOME}/.config/line-mcp/auth.json" ]]; then
-            TOKEN_LEN=$(sudo -u "${WAYDROID_USER}" python3 -c "import json,pathlib; d=json.loads(pathlib.Path('${USER_HOME}/.config/line-mcp/auth.json').read_text()); print(len(d.get('x_line_access','')))" 2>/dev/null || echo 0)
-            [[ "$TOKEN_LEN" -gt 100 ]] && { echo "  Token captured (${TOKEN_LEN} chars)"; break; }
-        fi
-        [[ $i -eq 15 ]] && echo "  Token not yet captured — LINE may need more time. Check /tmp/refresh-token.log"
-    done
+        HOME="$USER_HOME" XDG_RUNTIME_DIR="$USER_XDG" \
+        bash "$REFRESH_SCRIPT" --timeout 120 && echo "  Token captured." \
+        || echo "  WARNING: token capture failed — check output above"
 fi
 
 # ── Done ─────────────────────────────────────────────────────────────────────
