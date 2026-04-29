@@ -69,7 +69,7 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
-if [[ ! -e /dev/binder && ! -e /dev/binderfs/binder ]]; then
+if [[ ! -e /dev/binder && ! -e /dev/anbox-binder && ! -e /dev/binderfs/binder && ! -e /dev/binderfs/anbox-binder ]]; then
     echo "ERROR: binder device missing. Run 01-waydroid-install.sh first."
     exit 1
 fi
