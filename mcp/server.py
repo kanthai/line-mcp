@@ -6,6 +6,10 @@ Exposes read-only tools over the Waydroid LINE SQLite databases.
 
 from __future__ import annotations
 
+import json
+import subprocess
+import sys
+import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -300,6 +304,87 @@ def set_auth_token_tool(x_line_access: str) -> dict[str, str]:
     """
     save_auth_token(x_line_access)
     return {"status": "saved", "length": str(len(x_line_access))}
+
+
+@server.tool(name="refresh_cdn_token")
+def refresh_cdn_token_tool(frida_host: str = "192.168.240.112", frida_port: int = 27042, timeout: int = 45) -> dict[str, Any]:
+    """
+    Automatically capture a fresh X-Line-Access CDN token from LINE's SSL traffic.
+
+    Steps performed:
+      1. Ensures frida-server is running in the Waydroid container (starts it if not).
+      2. Runs tools/refresh_token.py to hook SSL_write in the LINE process.
+      3. Triggers LINE to make a network request (am start SplashActivity).
+      4. Waits up to `timeout` seconds for the token to appear in auth.json.
+
+    Returns {"status": "ok", "token_length": N} on success, or
+            {"status": "error", "detail": "..."} on failure.
+
+    frida_host: IP of Waydroid container (default 192.168.240.112)
+    frida_port: frida-server port (default 27042)
+    timeout: seconds to wait for token capture (default 45)
+    """
+    frida_bin = "/data/local/tmp/frida-server"
+    auth_file = Path.home() / ".config" / "line-mcp" / "auth.json"
+
+    def wsh(cmd: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["sudo", "waydroid", "shell", "--", "sh", "-c", cmd],
+            capture_output=True, text=True, timeout=15,
+        )
+
+    # 1. Start frida-server if not running
+    check = wsh("ps -A | grep -q '[f]rida-server' && echo yes || echo no")
+    if "yes" not in check.stdout:
+        wsh(f"setsid {frida_bin} -l 0.0.0.0:{frida_port} </dev/null >/data/local/tmp/frida.log 2>&1 &")
+        time.sleep(3)
+        check2 = wsh("ps -A | grep -q '[f]rida-server' && echo yes || echo no")
+        if "yes" not in check2.stdout:
+            return {"status": "error", "detail": "frida-server failed to start"}
+
+    # 2. Launch refresh_token.py subprocess
+    refresh_py = TOOLS_DIR / "refresh_token.py"
+    proc = subprocess.Popen(
+        [sys.executable, "-u", str(refresh_py), "--host", frida_host, "--port", str(frida_port)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        cwd=str(TOOLS_DIR),
+    )
+
+    # 3. Trigger LINE network activity after frida hook is loaded (~2s)
+    time.sleep(2)
+    wsh("am start -n jp.naver.line.android/.activity.SplashActivity")
+
+    # 4. Poll auth.json for a fresh token
+    deadline = time.monotonic() + timeout
+    captured_token = ""
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            break
+        if auth_file.exists():
+            try:
+                token = json.loads(auth_file.read_text()).get("x_line_access", "")
+                if len(token) > 100:
+                    captured_token = token
+                    break
+            except Exception:
+                pass
+        time.sleep(1)
+
+    # Clean up subprocess
+    if proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+
+    if captured_token:
+        return {"status": "ok", "token_length": len(captured_token)}
+
+    _, stderr = proc.communicate() if proc.poll() is not None else (b"", b"")
+    detail = stderr.decode(errors="replace")[-600:] if stderr else "timed out waiting for token"
+    return {"status": "error", "detail": detail}
 
 
 @server.tool(name="get_message_raw")
