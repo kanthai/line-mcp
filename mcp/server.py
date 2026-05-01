@@ -7,8 +7,11 @@ Exposes read-only tools over the Waydroid LINE SQLite databases.
 from __future__ import annotations
 
 import json
+import functools
+import os
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -33,6 +36,19 @@ server = FastMCP(
     instructions="Read-only MCP server for LINE chats stored in a Waydroid container.",
 )
 
+_line_call_gate = threading.BoundedSemaphore(
+    max(1, int(os.environ.get("LINE_MCP_MAX_CONCURRENCY", "2")))
+)
+
+
+def _serialized_line_call(func):
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        with _line_call_gate:
+            return func(*args, **kwargs)
+
+    return wrapper
+
 
 def _limit(value: int, *, default: int, maximum: int) -> int:
     if value <= 0:
@@ -45,24 +61,28 @@ def _to_dicts(items: list[Any]) -> list[dict[str, Any]]:
 
 
 @server.tool(name="list_chats")
+@_serialized_line_call
 def list_chats_tool(limit: int = 50) -> list[dict[str, Any]]:
     """List recent chats ordered by last activity."""
     return _to_dicts(list_chats(limit=_limit(limit, default=50, maximum=200)))
 
 
 @server.tool(name="list_unread_chats")
+@_serialized_line_call
 def list_unread_chats_tool(limit: int = 50) -> list[dict[str, Any]]:
     """List chats with unread_count > 0, ordered by last activity."""
     return _to_dicts(list_unread_chats(limit=_limit(limit, default=50, maximum=200)))
 
 
 @server.tool(name="get_messages")
+@_serialized_line_call
 def get_messages_tool(chat_id: str, limit: int = 50) -> list[dict[str, Any]]:
     """Get recent messages for one chat_id."""
     return _to_dicts(get_messages(chat_id=chat_id, limit=_limit(limit, default=50, maximum=200)))
 
 
 @server.tool(name="list_latest_inbound_messages")
+@_serialized_line_call
 def list_latest_inbound_messages_tool(limit: int = 10) -> list[dict[str, Any]]:
     """
     List newest messages received from other LINE users.
@@ -74,6 +94,7 @@ def list_latest_inbound_messages_tool(limit: int = 10) -> list[dict[str, Any]]:
 
 
 @server.tool(name="get_latest_inbound_message")
+@_serialized_line_call
 def get_latest_inbound_message_tool() -> dict[str, Any] | None:
     """Get the single newest message received from another LINE user, or null if none are found."""
     messages = list_latest_inbound_messages(limit=1)
@@ -81,6 +102,7 @@ def get_latest_inbound_message_tool() -> dict[str, Any] | None:
 
 
 @server.tool(name="list_reply_candidates")
+@_serialized_line_call
 def list_reply_candidates_tool(limit: int = 25) -> list[dict[str, Any]]:
     """
     List chats where someone else's latest message is newer than your latest outgoing reply.
@@ -92,6 +114,7 @@ def list_reply_candidates_tool(limit: int = 25) -> list[dict[str, Any]]:
 
 
 @server.tool(name="get_message_context")
+@_serialized_line_call
 def get_message_context_tool(message_id: int, before: int = 10, after: int = 5) -> dict[str, Any]:
     """Return messages around a specific message_id from the same chat."""
     context = get_message_context(
@@ -108,6 +131,7 @@ def get_message_context_tool(message_id: int, before: int = 10, after: int = 5) 
 
 
 @server.tool(name="find_person")
+@_serialized_line_call
 def find_person_tool(query: str, limit: int = 20, message_limit: int = 20) -> dict[str, Any]:
     """
     Search for a LINE person by contact/chat/sender name.
@@ -128,6 +152,7 @@ def find_person_tool(query: str, limit: int = 20, message_limit: int = 20) -> di
 
 
 @server.tool(name="summarize_recent_activity")
+@_serialized_line_call
 def summarize_recent_activity_tool(
     hours: int = 24,
     chat_limit: int = 30,
@@ -158,6 +183,7 @@ def summarize_recent_activity_tool(
 
 
 @server.tool(name="get_chat_summary")
+@_serialized_line_call
 def get_chat_summary_tool(
     chat_id: str,
     message_limit: int = 20,
@@ -175,24 +201,28 @@ def get_chat_summary_tool(
 
 
 @server.tool(name="search_messages")
+@_serialized_line_call
 def search_messages_tool(query: str, limit: int = 20) -> list[dict[str, Any]]:
     """Search message text across chat history."""
     return _to_dicts(search_messages(query=query, limit=_limit(limit, default=20, maximum=100)))
 
 
 @server.tool(name="list_media")
+@_serialized_line_call
 def list_media_tool(chat_id: str = "", limit: int = 20) -> list[dict[str, Any]]:
     """List recent media messages, optionally filtered to one chat_id."""
     return _to_dicts(list_media(chat_id=chat_id or None, limit=_limit(limit, default=20, maximum=100)))
 
 
 @server.tool(name="get_media_info")
+@_serialized_line_call
 def get_media_info_tool(message_id: int) -> dict[str, Any]:
     """Get metadata and URLs for one media message."""
     return asdict(get_media_info(message_id))
 
 
 @server.tool(name="download_media")
+@_serialized_line_call
 def download_media_tool(
     message_id: int,
     destination_dir: str = "~/Downloads/line-media",
@@ -207,6 +237,7 @@ def download_media_tool(
 
 
 @server.tool(name="pull_message_image")
+@_serialized_line_call
 def pull_message_image_tool(
     message_id: int,
     destination_dir: str = "~/Downloads/line-media",
@@ -230,6 +261,7 @@ def pull_message_image_tool(
 
 
 @server.tool(name="pull_chat_images")
+@_serialized_line_call
 def pull_chat_images_tool(
     chat_id: str,
     destination_dir: str = "~/Downloads/line-media",
@@ -255,6 +287,7 @@ def pull_chat_images_tool(
 
 
 @server.tool(name="open_chat_and_cache")
+@_serialized_line_call
 def open_chat_and_cache_tool(
     chat_id: str,
     wait_seconds: int = 8,
@@ -275,6 +308,7 @@ def open_chat_and_cache_tool(
 
 
 @server.tool(name="extract_cached_media")
+@_serialized_line_call
 def extract_cached_media_tool(
     destination_dir: str = "~/Downloads/line-media",
     min_bytes: int = 50_000,
@@ -294,6 +328,7 @@ def extract_cached_media_tool(
 
 
 @server.tool(name="set_auth_token")
+@_serialized_line_call
 def set_auth_token_tool(x_line_access: str) -> dict[str, str]:
     """
     Store a fresh X-Line-Access token for E2EE CDN downloads.
@@ -307,6 +342,7 @@ def set_auth_token_tool(x_line_access: str) -> dict[str, str]:
 
 
 @server.tool(name="refresh_cdn_token")
+@_serialized_line_call
 def refresh_cdn_token_tool(frida_host: str = "192.168.240.112", frida_port: int = 27042, timeout: int = 45) -> dict[str, Any]:
     """
     Automatically capture a fresh X-Line-Access CDN token from LINE's SSL traffic.
@@ -388,6 +424,7 @@ def refresh_cdn_token_tool(frida_host: str = "192.168.240.112", frida_port: int 
 
 
 @server.tool(name="get_message_raw")
+@_serialized_line_call
 def get_message_raw_tool(message_id: int) -> dict[str, Any]:
     """
     Return the raw parameter blob for one message, with any *_JSON fields auto-decoded.

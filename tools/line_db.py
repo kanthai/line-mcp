@@ -14,6 +14,7 @@ import hmac as _hmac
 import json
 import mimetypes
 import os
+import sqlite3
 import struct
 import subprocess
 import time
@@ -29,6 +30,14 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 CONTAINER_DB = "/data/data/jp.naver.line.android/databases/naver_line"
 CONTACT_DB  = "/data/data/jp.naver.line.android/databases/contact"
+HOST_DB = Path(os.environ.get(
+    "LINE_MCP_HOST_DB",
+    str(Path.home() / ".local/share/waydroid/data/data/jp.naver.line.android/databases/naver_line"),
+))
+HOST_CONTACT_DB = Path(os.environ.get(
+    "LINE_MCP_HOST_CONTACT_DB",
+    str(Path.home() / ".local/share/waydroid/data/data/jp.naver.line.android/databases/contact"),
+))
 
 # ── E2EE CDN auth ─────────────────────────────────────────────────────────────
 _AUTH_FILE = Path.home() / ".config" / "line-mcp" / "auth.json"
@@ -108,13 +117,50 @@ def _decrypt_blob(blob: bytes, km_b64: str) -> bytes:
     return cipher.decryptor().update(c)
 
 
-def _q(sql: str, attach_contact: bool = False) -> list[dict]:
+def _query_via_waydroid(sql: str, attach_contact: bool = False) -> list[dict]:
     prefix = f"ATTACH '{CONTACT_DB}' AS cdb; " if attach_contact else ""
     cmd = ["sudo", "waydroid", "shell", "--", "sqlite3", CONTAINER_DB, "-json", prefix + sql]
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
     if r.returncode != 0:
         raise RuntimeError(r.stderr.strip())
     return json.loads(r.stdout) if r.stdout.strip() else []
+
+
+def _connect_readonly(path: Path) -> sqlite3.Connection:
+    uri = f"file:{path}?mode=ro"
+    conn = sqlite3.connect(uri, uri=True, timeout=10)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA query_only = ON")
+    return conn
+
+
+def _query_via_direct_db(sql: str, attach_contact: bool = False) -> list[dict]:
+    if not HOST_DB.exists():
+        raise FileNotFoundError(HOST_DB)
+    conn = _connect_readonly(HOST_DB)
+    try:
+        if attach_contact:
+            if not HOST_CONTACT_DB.exists():
+                raise FileNotFoundError(HOST_CONTACT_DB)
+            escaped_contact = str(HOST_CONTACT_DB).replace("'", "''")
+            conn.execute(f"ATTACH DATABASE '{escaped_contact}' AS cdb")
+        return [dict(row) for row in conn.execute(sql).fetchall()]
+    finally:
+        conn.close()
+
+
+def _q(sql: str, attach_contact: bool = False) -> list[dict]:
+    mode = os.environ.get("LINE_MCP_DB_MODE", "auto").strip().lower()
+    if mode == "waydroid":
+        return _query_via_waydroid(sql, attach_contact=attach_contact)
+    if mode == "direct":
+        return _query_via_direct_db(sql, attach_contact=attach_contact)
+    if mode != "auto":
+        raise ValueError(f"unsupported LINE_MCP_DB_MODE: {mode}")
+    try:
+        return _query_via_direct_db(sql, attach_contact=attach_contact)
+    except Exception:
+        return _query_via_waydroid(sql, attach_contact=attach_contact)
 
 
 def _s(val: str) -> str:
