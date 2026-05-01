@@ -802,6 +802,10 @@ def summarize_recent_activity(
             FROM chat_history
             WHERE CAST(COALESCE(created_time, 0) AS INTEGER) >= {since_ms}
         ),
+        recent_chats AS (
+            SELECT DISTINCT chat_id
+            FROM recent
+        ),
         latest AS (
             SELECT r.*
             FROM recent r
@@ -815,19 +819,21 @@ def summarize_recent_activity(
         ),
         latest_inbound AS (
             SELECT
-                chat_id,
-                MAX(CAST(COALESCE(created_time, 0) AS INTEGER)) AS last_inbound_at
-            FROM chat_history
-            WHERE COALESCE(from_mid, '') != ''
-            GROUP BY chat_id
+                h.chat_id,
+                MAX(CAST(COALESCE(h.created_time, 0) AS INTEGER)) AS last_inbound_at
+            FROM chat_history h
+            JOIN recent_chats rc ON rc.chat_id = h.chat_id
+            WHERE COALESCE(h.from_mid, '') != ''
+            GROUP BY h.chat_id
         ),
         latest_outgoing AS (
             SELECT
-                chat_id,
-                MAX(CAST(COALESCE(created_time, 0) AS INTEGER)) AS last_outgoing_at
-            FROM chat_history
-            WHERE COALESCE(from_mid, '') = ''
-            GROUP BY chat_id
+                h.chat_id,
+                MAX(CAST(COALESCE(h.created_time, 0) AS INTEGER)) AS last_outgoing_at
+            FROM chat_history h
+            JOIN recent_chats rc ON rc.chat_id = h.chat_id
+            WHERE COALESCE(h.from_mid, '') = ''
+            GROUP BY h.chat_id
         )
         SELECT
             r.chat_id,
