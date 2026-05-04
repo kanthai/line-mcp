@@ -6,9 +6,6 @@ to ~/.config/line-mcp/auth.json for use by the CDN download path.
 
 Usage:
     python3 tools/refresh_token.py
-
-No Frida, no network interception needed — LINE stores the token in its
-SQLite database which is readable as root inside the Waydroid container.
 """
 from __future__ import annotations
 import subprocess, sys, re

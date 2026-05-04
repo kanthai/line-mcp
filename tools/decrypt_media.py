@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-LINE E2EE media decryption — offline, no Frida needed.
+LINE E2EE media decryption — offline CLI tool.
 
 Input:
   blob_path : path to raw CDN blob (C[file_size] || HMAC-SHA256[32])

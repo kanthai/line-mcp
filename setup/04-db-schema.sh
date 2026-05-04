@@ -15,7 +15,7 @@ echo "==> SQLCipher check"
 if $WS sqlite3 "$DB" "SELECT count(*) FROM sqlite_master;" > /dev/null 2>&1; then
     echo "  PLAIN SQLite — proceeding."
 else
-    echo "  *** SQLCIPHER ENCRYPTED *** — need Frida key extraction first."
+    echo "  *** SQLCIPHER ENCRYPTED *** — sqlite3 cannot read this DB. Re-install LINE and log in again."
     exit 1
 fi
 

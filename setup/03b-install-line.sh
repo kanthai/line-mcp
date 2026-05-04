@@ -192,7 +192,6 @@ if [[ $EUID -eq 0 ]] || sudo -n ls "$DB_PATH" > /dev/null 2>&1; then
     if sudo ls "$DB_PATH" > /dev/null 2>&1; then
         echo "SUCCESS: naver_line DB found"
         sudo ls -lh "$DB_PATH"
-        # Quick SQLCipher check — do this NOW so we know if Frida is needed
         echo ""
         echo "==> Checking if naver_line is plain SQLite or SQLCipher-encrypted..."
         COPY="/tmp/naver_line_check.db"
@@ -201,10 +200,8 @@ if [[ $EUID -eq 0 ]] || sudo -n ls "$DB_PATH" > /dev/null 2>&1; then
         if sqlite3 "$COPY" "SELECT count(*) FROM sqlite_master;" > /dev/null 2>&1; then
             echo "  PLAIN SQLite — read path will work directly."
         else
-            echo "  *** SQLCIPHER ENCRYPTED ***"
-            echo "  sqlite3 cannot open this DB directly."
-            echo "  The SQLite read path requires Frida to extract the encryption key first."
-            echo "  Phase ordering: complete Magisk + Frida setup before implementing MCP reads."
+            echo "  *** SQLCIPHER ENCRYPTED *** — sqlite3 cannot open this DB directly."
+            echo "  Re-install LINE and log in again; the DB should be unencrypted on Android 13."
         fi
         rm -f "$COPY"
     else
