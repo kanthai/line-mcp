@@ -21,6 +21,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
+import re
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from cryptography.hazmat.backends import default_backend
@@ -64,6 +66,28 @@ def _x_line_access() -> str | None:
     return os.environ.get("LINE_ACCESS_TOKEN") or _load_auth().get("x_line_access")
 
 
+def _refresh_token_from_db() -> str | None:
+    """Read a fresh CDN token from the host-side naver_line DB. Returns None on any failure."""
+    try:
+        conn = sqlite3.connect(f"file:{HOST_DB}?mode=ro", uri=True, timeout=10)
+        row = conn.execute(
+            "SELECT value FROM setting WHERE key='OBS_ENCRYPTED_ACCESS_TOKEN'"
+        ).fetchone()
+        conn.close()
+        if not row or not row[0]:
+            return None
+        raw = row[0].strip()
+        idx = len(raw)
+        for i in range(len(raw) - 1, -1, -1):
+            if raw[i] == "=":
+                idx = i + 1
+                break
+        token = raw[:idx]
+        return token if re.match(r"^[A-Za-z0-9+/]+=*$", token) else None
+    except Exception:
+        return None
+
+
 def _make_x_talk_meta(server_id: str) -> str:
     """Build the X-Talk-Meta header value (base64 JSON wrapping Thrift binary)."""
     sid_b = server_id.encode()
@@ -79,22 +103,33 @@ def _make_x_talk_meta(server_id: str) -> str:
 
 
 def _download_blob(server_id: str, sid: str, oid: str) -> bytes | None:
-    """Download an E2EE blob from the CDN. Returns None if auth token missing or request fails."""
+    """Download an E2EE blob from the CDN. Returns None if auth token missing or request fails.
+    On 401/403, re-reads the token from the local DB and retries once automatically."""
     token = _x_line_access()
     if not token:
         return None
     url = f"{_CDN_BASE}/{sid}/{oid}"
-    req = Request(url, headers={
-        "X-Talk-Meta": _make_x_talk_meta(server_id),
-        "X-Line-Access": token,
-        "X-Line-Application": _LINE_APP,
-        "User-Agent": _UA,
-    })
-    try:
-        with urlopen(req, timeout=30) as resp:
-            return resp.read()
-    except Exception:
-        return None
+    for attempt in range(2):
+        req = Request(url, headers={
+            "X-Talk-Meta": _make_x_talk_meta(server_id),
+            "X-Line-Access": token,
+            "X-Line-Application": _LINE_APP,
+            "User-Agent": _UA,
+        })
+        try:
+            with urlopen(req, timeout=30) as resp:
+                return resp.read()
+        except HTTPError as e:
+            if e.code in (401, 403) and attempt == 0:
+                fresh = _refresh_token_from_db()
+                if fresh:
+                    save_auth_token(fresh)
+                    token = fresh
+                    continue
+            return None
+        except Exception:
+            return None
+    return None
 
 
 def _decrypt_blob(blob: bytes, km_b64: str) -> bytes:
