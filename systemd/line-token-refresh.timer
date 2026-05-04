@@ -1,0 +1,10 @@
+[Unit]
+Description=Periodically refresh LINE CDN auth token
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=6h
+Unit=line-token-refresh.service
+
+[Install]
+WantedBy=timers.target

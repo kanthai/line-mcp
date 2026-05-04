@@ -1,0 +1,13 @@
+#!/bin/sh
+# systemd-sleep hook: immediately unfreeze Waydroid container after system resume.
+# Install to /usr/lib/systemd/system-sleep/waydroid-resume-unfreeze (chmod 755).
+# Runs as root; no sudo needed.
+
+case "$1" in
+    post)
+        # Give the network stack a moment to come back up before unfreezing.
+        sleep 2
+        waydroid container unfreeze 2>/dev/null || true
+        logger -t waydroid-resume-unfreeze "Container unfreeze triggered after resume"
+        ;;
+esac

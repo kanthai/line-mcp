@@ -336,17 +336,14 @@ def _run_waydroid_shell(args: list[str], *, timeout: int = 30, text: bool = True
 
 def _list_cache_files(min_bytes: int = 50_000) -> list[dict[str, int | str]]:
     dirs = " ".join(_cache_dirs())
+    # Use find -printf to get path/size/mtime in one pass — avoids per-file stat calls
     script = (
         f"for d in {dirs}; do "
         "[ -d \"$d\" ] || continue; "
-        "find \"$d\" -type f 2>/dev/null | while IFS= read -r f; do "
-        "size=$(stat -c %s \"$f\" 2>/dev/null || echo 0); "
-        "mtime=$(stat -c %Y \"$f\" 2>/dev/null || echo 0); "
-        f"[ \"$size\" -ge {int(min_bytes)} ] && printf '%s\\t%s\\t%s\\n' \"$f\" \"$size\" \"$mtime\"; "
-        "done; "
+        f"find \"$d\" -type f -size +{int(min_bytes - 1)}c -printf '%p\\t%s\\t%T@\\n' 2>/dev/null; "
         "done"
     )
-    result = _run_waydroid_shell(["sh", "-c", script])
+    result = _run_waydroid_shell(["sh", "-c", script], timeout=60)
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip())
 
@@ -356,8 +353,9 @@ def _list_cache_files(min_bytes: int = 50_000) -> list[dict[str, int | str]]:
         if len(parts) != 3:
             continue
         path, size, mtime = parts
-        if path.startswith(tuple(_cache_dirs())) and size.isdigit() and mtime.isdigit():
-            files.append({"file": path, "size": int(size), "mtime": int(mtime)})
+        mtime_int = int(float(mtime)) if mtime else 0
+        if path.startswith(tuple(_cache_dirs())) and size.isdigit():
+            files.append({"file": path, "size": int(size), "mtime": mtime_int})
     files.sort(key=lambda item: int(item["mtime"]), reverse=True)
     return files
 

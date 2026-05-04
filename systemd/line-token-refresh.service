@@ -1,0 +1,8 @@
+[Unit]
+Description=Refresh LINE CDN auth token from SQLite DB
+After=waydroid-watchdog.service
+Wants=waydroid-watchdog.service
+
+[Service]
+Type=oneshot
+ExecStart=/home/kanthai/line-mcp/tools/line-token-refresh.sh
