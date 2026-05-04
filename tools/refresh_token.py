@@ -8,25 +8,27 @@ Usage:
     python3 tools/refresh_token.py
 """
 from __future__ import annotations
-import subprocess, sys, re
+import re, sqlite3, sys
 from pathlib import Path
 
-DB_PATH = "/data/data/jp.naver.line.android/databases/naver_line"
 SETTING_KEY = "OBS_ENCRYPTED_ACCESS_TOKEN"
 
 
 def read_token_from_db() -> str:
-    result = subprocess.run(
-        ["sudo", "waydroid", "shell", "--", "sqlite3", DB_PATH,
-         f"SELECT value FROM setting WHERE key = '{SETTING_KEY}';"],
-        capture_output=True, text=True, timeout=30,
-    )
-    if result.returncode != 0 or not result.stdout.strip():
-        raise RuntimeError(f"sqlite3 query failed: {result.stderr.strip()}")
+    sys.path.insert(0, str(Path(__file__).parent))
+    from line_db import HOST_DB
 
-    raw = result.stdout.strip()
-    # The stored value is base64 token followed by metadata (non-base64 digits).
-    # Strip everything after the last '=' padding character.
+    conn = sqlite3.connect(f"file:{HOST_DB}?mode=ro", uri=True, timeout=10)
+    row = conn.execute(
+        "SELECT value FROM setting WHERE key = ?", (SETTING_KEY,)
+    ).fetchone()
+    conn.close()
+
+    if not row or not row[0]:
+        raise RuntimeError("OBS_ENCRYPTED_ACCESS_TOKEN not found in naver_line DB")
+
+    raw = row[0].strip()
+    # Stored value is base64 token followed by metadata digits after the last '='.
     idx = len(raw)
     for i in range(len(raw) - 1, -1, -1):
         if raw[i] == "=":
@@ -34,7 +36,7 @@ def read_token_from_db() -> str:
             break
     token = raw[:idx]
     if not re.match(r"^[A-Za-z0-9+/]+=*$", token):
-        raise RuntimeError(f"Extracted value doesn't look like base64: {token[:40]}...")
+        raise RuntimeError(f"Value doesn't look like base64: {token[:40]}...")
     return token
 
 
