@@ -9,9 +9,9 @@ No LINE API key required. No cloud relay. Everything runs locally on your own ma
 ## What it does
 
 - **Read LINE chats and messages** — list, search, triage, summarize
-- **Decrypt E2EE photos headlessly** — no UI tap, no Frida hook at runtime, no Waydroid window needed
+- **Decrypt E2EE photos headlessly** — no UI tap, no Waydroid window needed
 - **Read Flex and Markup card data** — extract structured content (account balances, action buttons) from bank/service bot messages that have no plain text
-- **Token management** — capture and rotate the CDN auth token via an SSL hook
+- **Token management** — read and rotate the CDN auth token directly from LINE's SQLite database; no network interception needed
 
 The MCP server exposes 20 tools to any MCP-compatible AI orchestrator (Claude Desktop, Claude Code, OpenClaw, etc.).
 
@@ -38,7 +38,7 @@ For E2EE media (photos sent with Letter Sealing), LINE caches the decrypted key 
 5. Decrypt: AES-256-CTR(Kenc, IV + b"\x00"*4, C) → plaintext JPEG
 ```
 
-The CDN auth token (`X-Line-Access`) is a session-scoped bearer token (~24–48h) that LINE fetches from its auth server at startup. It is captured via a Frida SSL hook that intercepts the outgoing HTTP/1.1 request to `obs-th.line-apps.com` and persisted to `~/.config/line-mcp/auth.json`. It needs re-capturing only after the token expires or LINE re-registers the device.
+The CDN auth token (`X-Line-Access`) is a session-scoped bearer token (~24–48h). LINE stores it in plaintext in the `naver_line` SQLite database under `setting.OBS_ENCRYPTED_ACCESS_TOKEN`. We read it with a single `sqlite3` query and persist it to `~/.config/line-mcp/auth.json`. It needs refreshing only after the token expires (~daily).
 
 ---
 
@@ -54,23 +54,7 @@ Tested and working on **NVIDIA DGX Spark** running **Ubuntu 24.04.4 LTS** (kerne
 - [Waydroid](https://waydroid.io/) with Android 13 and LINE installed
 - **LINE APK** — not included; you must source this yourself. LINE is available on the Google Play Store or as an `.apkm` from [APKMirror](https://www.apkmirror.com/apk/line-corporation/line/). This tool does not distribute LINE in any form.
 - Python 3.10+ with `cryptography`, `requests`, `mcp` packages
-- For token refresh: `frida` and `frida-tools` Python packages, `frida-server` running inside Waydroid
 - `sudo` access to run `waydroid shell` commands
-
-### Architecture
-
-| Host | LINE APK variant | frida-server variant |
-|------|-----------------|----------------------|
-| aarch64 (ARM64) | `arm64-v8a` | `android-arm64` |
-| x86_64 | `x86_64` | `android-x86_64` |
-
-The setup scripts default to `arm64-v8a` / `android-arm64`. On x86_64, set these before running:
-
-```bash
-export FRIDA_ARCH=android-x86_64
-```
-
-And download the `x86_64` LINE APK variant from APKMirror.
 
 ---
 
@@ -81,7 +65,6 @@ And download the `x86_64` LINE APK variant from APKMirror.
 ```bash
 sudo bash setup/01-waydroid-install.sh   # install Waydroid
 sudo bash setup/02-waydroid-init.sh      # init Android 13 image (arch auto-detected)
-sudo bash setup/05-frida-install.sh      # install frida-server in container
 ```
 
 **Install LINE APK** — two options depending on what you have:
@@ -106,26 +89,17 @@ sudo bash setup/06-fix-a13-storage-omx.sh
 
 ```bash
 pip install -r requirements.txt
-pip install -r requirements-frida.txt   # only needed for token refresh
 ```
 
 ### 3. Capture the CDN auth token
 
 ```bash
-bash tools/refresh-cdn-token.sh
-# restarts LINE, intercepts the CDN request via Frida SSL hook,
-# and auto-saves the token to ~/.config/line-mcp/auth.json
+python3 tools/refresh_token.py
+# reads OBS_ENCRYPTED_ACCESS_TOKEN from LINE's naver_line SQLite DB
+# saves token to ~/.config/line-mcp/auth.json
 ```
 
-The token is valid for ~24–48 hours. Re-run this script after the token expires or after LINE re-registers the device. Restarting LINE itself does not rotate the token — the auth server returns the same token until it expires.
-
-> **How it works**: the script force-stops LINE (clearing Glide's in-memory image cache), spawns it fresh via Frida, then navigates to a chat with images. When LINE re-fetches the images from the CDN, the SSL hook captures the `X-Line-Access` header from the outgoing HTTP/1.1 request.
-
-Options:
-```bash
-bash tools/refresh-cdn-token.sh --no-spawn   # attach to already-running LINE (only if just started cold)
-bash tools/refresh-cdn-token.sh --timeout 60 # shorter timeout
-```
+The token is valid for ~24–48 hours. The watchdog timer re-runs this automatically every 6 hours. You only need to run it manually after a fresh LINE login or device re-registration.
 
 ### 4. Wire into your MCP client
 
@@ -177,7 +151,7 @@ result["count"]            # number of files saved
 result["downloaded_files"] # list: {downloaded, decrypted, path, bytes, mime_type}
 ```
 
-If `mode == "cache"` and `count == 0`, the CDN token is stale — run `refresh_token.py` again.
+If `mode == "cache"` and `count == 0`, the CDN token is stale — run `python3 tools/refresh_token.py`.
 
 ### Flex and Markup messages
 
@@ -190,22 +164,29 @@ Banks and services (e.g. KBank, SCB) send rich card messages with no plain text.
 
 ## Watchdog
 
-Keep LINE and Waydroid alive automatically. The sudoers rules are written automatically by `01-waydroid-install.sh`. To enable the timers:
+Keep LINE, Waydroid, and the CDN token alive automatically. The sudoers rules are written by `01-waydroid-install.sh`. To enable the timers:
 
 ```bash
-# Copy watchdog scripts to somewhere on your PATH, e.g.:
-sudo cp tools/line-watchdog.sh tools/waydroid-watchdog.sh /usr/local/bin/
-
-# Install and enable the systemd user timers
 cp systemd/line-watchdog.{service,timer} \
    systemd/waydroid-watchdog.{service,timer} \
+   systemd/line-foreground-pulse.{service,timer} \
+   systemd/line-token-refresh.{service,timer} \
    ~/.config/systemd/user/
 
 systemctl --user daemon-reload
-systemctl --user enable --now waydroid-watchdog.timer line-watchdog.timer
+systemctl --user enable --now \
+    waydroid-watchdog.timer \
+    line-watchdog.timer \
+    line-foreground-pulse.timer \
+    line-token-refresh.timer
 ```
 
-The waydroid watchdog runs every 3 minutes and automatically unfreezes the container if it enters a FROZEN/FREEZING state.
+| Timer | Interval | Purpose |
+|-------|----------|---------|
+| `waydroid-watchdog` | every 3 min | Restart Waydroid session if down; unfreeze container if frozen (waits up to 15s before escalating to full restart) |
+| `line-watchdog` | every 5 min | Restart LINE process if not running |
+| `line-foreground-pulse` | every 10 min | Bring LINE to foreground to encourage message sync |
+| `line-token-refresh` | every 6 h | Re-read CDN token from SQLite and update auth.json |
 
 ---
 
@@ -234,16 +215,17 @@ The only time a display is needed is `open_chat_and_cache` (last-resort fallback
 ## Project layout
 
 ```
-mcp/server.py                — FastMCP stdio server (20 tools)
-tools/line_db.py             — SQLite read layer + E2EE decrypt pipeline
-tools/refresh-cdn-token.sh   — One-shot token refresh: spawn LINE, sniff SSL, save token
-tools/refresh_token.py       — Low-level Frida SSL hook (called by refresh-cdn-token.sh)
-tools/decrypt_media.py       — CLI tool: decrypt a blob file given a KM hex string
-tools/start-after-reboot.sh  — Full post-reboot startup: Weston + Waydroid + LINE + token
-tools/line-watchdog.sh       — Keep LINE process running inside Waydroid
-tools/waydroid-watchdog.sh   — Keep Waydroid session alive; auto-unfreeze
-tools/waydroid-storage-fix.sh — Fix Waydroid FUSE emulated storage (run once if needed)
-setup/                       — One-time setup scripts (01–06)
+mcp/server.py                   — FastMCP stdio server (20 tools)
+tools/line_db.py                — SQLite read layer + E2EE decrypt pipeline
+tools/refresh_token.py          — Read CDN token from LINE's naver_line SQLite DB
+tools/decrypt_media.py          — CLI tool: decrypt a blob file given a KM hex string
+tools/start-after-reboot.sh     — Full post-reboot startup: Weston + Waydroid + LINE + token
+tools/line-watchdog.sh          — Keep LINE process running inside Waydroid
+tools/waydroid-watchdog.sh      — Keep Waydroid session alive; auto-unfreeze frozen container
+tools/line-token-refresh.sh     — Refresh CDN token (called by line-token-refresh.timer)
+tools/waydroid-storage-fix.sh   — Fix Waydroid FUSE emulated storage (run once if needed)
+systemd/                        — systemd user service + timer units
+setup/                          — One-time setup scripts (01–06)
 ```
 
 ---
