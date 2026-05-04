@@ -46,4 +46,4 @@ echo "=== chat sample (5 rows) ==="
 $WS sqlite3 -header "$DB" "SELECT chat_id,chat_name,last_message,last_created_time,message_count,unread_type_and_count FROM chat ORDER BY last_created_time DESC LIMIT 5;" 2>/dev/null || true
 
 echo ""
-echo "Next: sudo bash 05-frida-install.sh"
+echo "Next: python3 tools/refresh_token.py  # capture CDN token"

@@ -73,4 +73,4 @@ echo "==> Verifying install"
 waydroid shell -- pm path jp.naver.line.android
 
 echo ""
-echo "Next: bash 03b-install-line.sh  (log in via GUI), then sudo bash 05-frida-install.sh"
+echo "Next: bash 03b-install-line.sh  (log in via GUI), then python3 tools/refresh_token.py"

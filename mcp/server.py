@@ -57,7 +57,27 @@ def _limit(value: int, *, default: int, maximum: int) -> int:
 
 
 def _to_dicts(items: list[Any]) -> list[dict[str, Any]]:
-    return [asdict(item) for item in items]
+    rows = [asdict(item) for item in items]
+    for row in rows:
+        _annotate_direction(row)
+    return rows
+
+
+def _annotate_direction(row: dict[str, Any]) -> None:
+    if "sender_id" in row:
+        if row.get("sender_id"):
+            row["direction"] = "inbound"
+        else:
+            row["direction"] = "outgoing"
+            if not row.get("sender_name"):
+                row["sender_name"] = "You"
+    if "latest_sender_id" in row:
+        if row.get("latest_sender_id"):
+            row["latest_direction"] = "inbound"
+        else:
+            row["latest_direction"] = "outgoing"
+            if not row.get("latest_sender_name"):
+                row["latest_sender_name"] = "You"
 
 
 @server.tool(name="list_chats")
@@ -156,7 +176,7 @@ def find_person_tool(query: str, limit: int = 20, message_limit: int = 20) -> di
 def summarize_recent_activity_tool(
     hours: int = 24,
     chat_limit: int = 30,
-    messages_per_chat: int = 12,
+    messages_per_chat: int = 24,
 ) -> dict[str, Any]:
     """
     Return structured LINE activity for the last N hours.
@@ -168,13 +188,26 @@ def summarize_recent_activity_tool(
     result = summarize_recent_activity(
         hours=_limit(hours, default=24, maximum=168),
         chat_limit=_limit(chat_limit, default=30, maximum=100),
-        messages_per_chat=_limit(messages_per_chat, default=12, maximum=50),
+        messages_per_chat=_limit(messages_per_chat, default=24, maximum=100),
     )
+    activities = _to_dicts(result["activities"])
     return {
         "since_ms": result["since_ms"],
         "hours": result["hours"],
         "chat_count": result["chat_count"],
-        "activities": _to_dicts(result["activities"]),
+        "source_limits": {
+            "hours": result["hours"],
+            "chat_limit": _limit(chat_limit, default=30, maximum=100),
+            "messages_per_chat": _limit(messages_per_chat, default=24, maximum=100),
+        },
+        "source_chat_names": [activity.get("chat_name", "") for activity in activities],
+        "summary_rules": [
+            "Only summarize chats and messages present in this tool result.",
+            "Do not introduce chat names, people, topics, counts, unread counts, or media that are absent from activities/messages_by_chat.",
+            "Treat direction='outgoing' and latest_direction='outgoing' as messages sent by the user, not by the chat/person name.",
+            "Treat needs_reply as a raw database signal; group chats and official accounts may not require user action.",
+        ],
+        "activities": activities,
         "messages_by_chat": {
             chat_id: _to_dicts(messages)
             for chat_id, messages in result["messages_by_chat"].items()
@@ -343,84 +376,33 @@ def set_auth_token_tool(x_line_access: str) -> dict[str, str]:
 
 @server.tool(name="refresh_cdn_token")
 @_serialized_line_call
-def refresh_cdn_token_tool(frida_host: str = "192.168.240.112", frida_port: int = 27042, timeout: int = 45) -> dict[str, Any]:
+def refresh_cdn_token_tool() -> dict[str, Any]:
     """
-    Automatically capture a fresh X-Line-Access CDN token from LINE's SSL traffic.
+    Read a fresh X-Line-Access CDN token directly from LINE's SQLite database
+    and save it to ~/.config/line-mcp/auth.json.
 
-    Steps performed:
-      1. Ensures frida-server is running in the Waydroid container (starts it if not).
-      2. Runs tools/refresh_token.py to hook SSL_write in the LINE process.
-      3. Triggers LINE to make a network request (am start SplashActivity).
-      4. Waits up to `timeout` seconds for the token to appear in auth.json.
+    LINE stores the live session token in the naver_line database under
+    setting.OBS_ENCRYPTED_ACCESS_TOKEN. No network interception needed.
 
     Returns {"status": "ok", "token_length": N} on success, or
             {"status": "error", "detail": "..."} on failure.
-
-    frida_host: IP of Waydroid container (default 192.168.240.112)
-    frida_port: frida-server port (default 27042)
-    timeout: seconds to wait for token capture (default 45)
     """
-    frida_bin = "/data/local/tmp/frida-server"
-    auth_file = Path.home() / ".config" / "line-mcp" / "auth.json"
-
-    def wsh(cmd: str) -> subprocess.CompletedProcess:
-        return subprocess.run(
-            ["sudo", "waydroid", "shell", "--", "sh", "-c", cmd],
-            capture_output=True, text=True, timeout=15,
-        )
-
-    # 1. Start frida-server if not running
-    check = wsh("ps -A | grep -q '[f]rida-server' && echo yes || echo no")
-    if "yes" not in check.stdout:
-        wsh(f"setsid {frida_bin} -l 0.0.0.0:{frida_port} </dev/null >/data/local/tmp/frida.log 2>&1 &")
-        time.sleep(3)
-        check2 = wsh("ps -A | grep -q '[f]rida-server' && echo yes || echo no")
-        if "yes" not in check2.stdout:
-            return {"status": "error", "detail": "frida-server failed to start"}
-
-    # 2. Launch refresh_token.py subprocess
     refresh_py = TOOLS_DIR / "refresh_token.py"
-    proc = subprocess.Popen(
-        [sys.executable, "-u", str(refresh_py), "--host", frida_host, "--port", str(frida_port)],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    result = subprocess.run(
+        [sys.executable, str(refresh_py)],
+        capture_output=True, text=True, timeout=30,
         cwd=str(TOOLS_DIR),
     )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "unknown error")[-600:]
+        return {"status": "error", "detail": detail}
 
-    # 3. Trigger LINE network activity after frida hook is loaded (~2s)
-    time.sleep(2)
-    wsh("am start -n jp.naver.line.android/.activity.SplashActivity")
-
-    # 4. Poll auth.json for a fresh token
-    deadline = time.monotonic() + timeout
-    captured_token = ""
-    while time.monotonic() < deadline:
-        if proc.poll() is not None:
-            break
-        if auth_file.exists():
-            try:
-                token = json.loads(auth_file.read_text()).get("x_line_access", "")
-                if len(token) > 100:
-                    captured_token = token
-                    break
-            except Exception:
-                pass
-        time.sleep(1)
-
-    # Clean up subprocess
-    if proc.poll() is None:
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
-
-    if captured_token:
-        return {"status": "ok", "token_length": len(captured_token)}
-
-    _, stderr = proc.communicate() if proc.poll() is not None else (b"", b"")
-    detail = stderr.decode(errors="replace")[-600:] if stderr else "timed out waiting for token"
-    return {"status": "error", "detail": detail}
+    auth_file = Path.home() / ".config" / "line-mcp" / "auth.json"
+    try:
+        token = json.loads(auth_file.read_text()).get("x_line_access", "")
+        return {"status": "ok", "token_length": len(token)}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
 
 
 @server.tool(name="get_message_raw")

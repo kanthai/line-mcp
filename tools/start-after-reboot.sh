@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
-# Start Waydroid + LINE + frida-server + capture CDN token after a reboot.
+# Start Waydroid + LINE + CDN token after a reboot.
 # Run as: sudo bash tools/start-after-reboot.sh
 set -euo pipefail
 
 WAYDROID_USER="${WAYDROID_USER:-${SUDO_USER:-$(logname)}}"
-FRIDA_BIN="/data/local/tmp/frida-server"
-FRIDA_PORT="${FRIDA_PORT:-27042}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 USER_UID=$(id -u "${WAYDROID_USER}")
@@ -88,36 +86,20 @@ for i in $(seq 1 60); do
 done
 echo "  Android booted"
 
-# ── 5. frida-server ──────────────────────────────────────────────────────────
-
-echo "==> frida-server"
-if wsh "ps -A | grep -q '[f]rida-server'" 2>/dev/null; then
-    echo "  Already running"
-else
-    wsh "setsid ${FRIDA_BIN} -l 0.0.0.0:${FRIDA_PORT} </dev/null >/data/local/tmp/frida.log 2>&1 &"
-    sleep 3
-    wsh "ps -A | grep -q '[f]rida-server'" 2>/dev/null && echo "  Started" || echo "  WARNING: frida-server did not start"
-fi
-
-# ── 6. Launch LINE ───────────────────────────────────────────────────────────
+# ── 5. Launch LINE ───────────────────────────────────────────────────────────
 
 echo "==> Launching LINE"
 wsh "am start -n jp.naver.line.android/.activity.SplashActivity" > /dev/null 2>&1 || true
 sleep 5
 
-# ── 7. Capture CDN token ─────────────────────────────────────────────────────
+# ── 6. Capture CDN token ─────────────────────────────────────────────────────
 
 echo "==> Capturing CDN token"
-REFRESH_SCRIPT="${SCRIPT_DIR}/refresh-cdn-token.sh"
-if [[ ! -x "$REFRESH_SCRIPT" ]]; then
-    echo "  WARNING: $REFRESH_SCRIPT not found — capture token manually"
-else
-    # After a reboot LINE just started cold; spawn mode is the default.
-    sudo -E -u "${WAYDROID_USER}" \
-        HOME="$USER_HOME" XDG_RUNTIME_DIR="$USER_XDG" \
-        bash "$REFRESH_SCRIPT" --timeout 120 && echo "  Token captured." \
-        || echo "  WARNING: token capture failed — check output above"
-fi
+sudo -E -u "${WAYDROID_USER}" \
+    HOME="$USER_HOME" XDG_RUNTIME_DIR="$USER_XDG" \
+    python3 "${SCRIPT_DIR}/refresh_token.py" \
+    && echo "  Token captured." \
+    || echo "  WARNING: token capture failed — run python3 tools/refresh_token.py manually"
 
 # ── Done ─────────────────────────────────────────────────────────────────────
 
@@ -127,5 +109,4 @@ IP=$(sudo -E -u "${WAYDROID_USER}" XDG_RUNTIME_DIR="$USER_XDG" \
 echo ""
 echo "Done."
 echo "  Waydroid IP:  $IP"
-echo "  frida-server: ${IP}:${FRIDA_PORT}"
 echo "  MCP server:   python3 mcp/server.py"
