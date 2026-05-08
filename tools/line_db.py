@@ -155,7 +155,7 @@ def _decrypt_blob(blob: bytes, km_b64: str) -> bytes:
 def _query_via_waydroid(sql: str, attach_contact: bool = False) -> list[dict]:
     prefix = f"ATTACH '{CONTACT_DB}' AS cdb; " if attach_contact else ""
     cmd = ["sudo", "waydroid", "shell", "--", "sqlite3", CONTAINER_DB, "-json", prefix + sql]
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=45)
     if r.returncode != 0:
         raise RuntimeError(r.stderr.strip())
     return json.loads(r.stdout) if r.stdout.strip() else []

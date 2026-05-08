@@ -69,9 +69,17 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
-if [[ ! -e /dev/binder && ! -e /dev/anbox-binder && ! -e /dev/binderfs/binder && ! -e /dev/binderfs/anbox-binder ]]; then
-    echo "ERROR: binder device missing. Run 01-waydroid-install.sh first."
-    exit 1
+# binder-control existing means binderfs is mounted — waydroid session start
+# will create the actual device nodes via ioctl, so accept it as sufficient.
+if [[ ! -e /dev/binder && ! -e /dev/anbox-binder && ! -e /dev/binderfs/binder && ! -e /dev/binderfs/anbox-binder && ! -e /dev/binderfs/binder-control ]]; then
+    # Last resort: try to load the module and mount binderfs ourselves.
+    modprobe binder_linux 2>/dev/null || true
+    mkdir -p /dev/binderfs
+    mount -t binder binder /dev/binderfs 2>/dev/null || true
+    if [[ ! -e /dev/binderfs/binder-control ]]; then
+        echo "ERROR: binder device missing and could not load binder_linux. Run 01-waydroid-install.sh first."
+        exit 1
+    fi
 fi
 
 if [[ -f "$SYSTEM_IMG" && -z "$FORCE" ]]; then

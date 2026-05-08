@@ -1,0 +1,14 @@
+[Unit]
+Description=Mount binderfs for Waydroid
+DefaultDependencies=no
+After=systemd-tmpfiles-setup-dev.service
+Before=waydroid-container.service
+
+[Mount]
+What=binder
+Where=/dev/binderfs
+Type=binder
+Options=defaults
+
+[Install]
+WantedBy=sysinit.target

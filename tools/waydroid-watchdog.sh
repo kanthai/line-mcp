@@ -79,6 +79,15 @@ echo "$LOG_TAG Restarting waydroid-container"
 sudo systemctl restart waydroid-container
 sleep 5
 
+# Ensure binderfs is mounted (kernel 6.17+ uses binderfs; module may not
+# auto-mount after reboot even if binder_linux is loaded).
+if [[ ! -e /dev/binderfs/binder-control ]]; then
+    echo "$LOG_TAG Mounting binderfs"
+    sudo modprobe binder_linux 2>/dev/null || true
+    sudo mkdir -p /dev/binderfs
+    sudo mount -t binder binder /dev/binderfs 2>/dev/null || true
+fi
+
 echo "$LOG_TAG Reinitializing Waydroid session"
 sudo "$INIT_SCRIPT" >/dev/null
 

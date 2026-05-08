@@ -68,22 +68,27 @@ else
     echo "binder" > /etc/modules-load.d/waydroid.conf
 fi
 
-echo "==> Mounting binderfs"
-ensure_binderfs_mount
+echo "==> Installing binderfs systemd mount unit"
+# Persistent binderfs mount via systemd (fstab is unreliable — /dev is tmpfs and
+# the mount point directory doesn't exist yet when fstab is processed at boot).
+REPO_DIR_EARLY="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cp "${REPO_DIR_EARLY}/conf/waydroid-binderfs.tmpfiles" /etc/tmpfiles.d/waydroid-binderfs.conf
+cp "${REPO_DIR_EARLY}/systemd/dev-binderfs.mount" /etc/systemd/system/dev-binderfs.mount
+systemctl daemon-reload
+systemctl enable --now dev-binderfs.mount
 
-if ! grep -q '^binder /dev/binderfs binder ' /etc/fstab 2>/dev/null; then
-    echo "binder /dev/binderfs binder defaults 0 0" >> /etc/fstab
-fi
+echo "==> Mounting binderfs (current session)"
+ensure_binderfs_mount
 
 echo "==> Verifying binder devices"
 sleep 1
-if [[ ! -e /dev/binder && ! -e /dev/binderfs/binder ]]; then
-    echo "ERROR: binder device not present after modprobe."
+if [[ ! -e /dev/binderfs/binder-control ]]; then
+    echo "ERROR: binderfs not mounted correctly."
     echo "  dmesg output:"
     dmesg | grep -i binder | tail -10 || true
     exit 1
 fi
-ls -la /dev/binder* /dev/binderfs /dev/binderfs/* /dev/ashmem 2>/dev/null || true
+ls -la /dev/binderfs/ 2>/dev/null || true
 echo "binder OK"
 
 echo "==> Enabling Waydroid container service"
@@ -98,6 +103,9 @@ ${WAYDROID_USER} ALL=(root) NOPASSWD: /usr/bin/waydroid container unfreeze
 ${WAYDROID_USER} ALL=(root) NOPASSWD: /usr/bin/waydroid container freeze
 ${WAYDROID_USER} ALL=(root) NOPASSWD: /usr/bin/waydroid shell -- *
 ${WAYDROID_USER} ALL=(root) NOPASSWD: ${REPO_DIR}/setup/02-waydroid-init.sh
+${WAYDROID_USER} ALL=(root) NOPASSWD: /sbin/modprobe binder_linux
+${WAYDROID_USER} ALL=(root) NOPASSWD: /bin/mkdir -p /dev/binderfs
+${WAYDROID_USER} ALL=(root) NOPASSWD: /bin/mount -t binder binder /dev/binderfs
 SUDOERS
 chmod 440 "$SUDOERS_FILE"
 echo "   Written: $SUDOERS_FILE"
