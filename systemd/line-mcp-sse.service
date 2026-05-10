@@ -1,0 +1,18 @@
+[Unit]
+Description=line-mcp FastMCP SSE server
+After=waydroid-session-xvfb.service
+Requires=waydroid-session-xvfb.service
+
+[Service]
+Type=simple
+User=kanthai
+WorkingDirectory=/home/kanthai/line-mcp
+Environment=WAYLAND_DISPLAY=wayland-0
+ExecStart=/home/kanthai/line-mcp/venv/bin/python3 /home/kanthai/line-mcp/mcp/server.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

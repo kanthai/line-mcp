@@ -422,7 +422,7 @@ def get_message_raw_tool(message_id: int) -> dict[str, Any]:
 
 
 def main() -> None:
-    server.run(transport="stdio")
+    server.run(transport="sse", host="0.0.0.0", port=8765)
 
 
 if __name__ == "__main__":
