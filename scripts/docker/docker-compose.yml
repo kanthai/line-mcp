@@ -1,0 +1,28 @@
+# Deploy to /opt/agent-stack/ on TrueNAS
+# Replace TRUENAS_POOL with your pool name (e.g. tank)
+# Replace SPARK_IP with DGX Spark LAN IP (e.g. 192.168.1.10)
+services:
+  openclaw:
+    build: ./openclaw
+    container_name: openclaw
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - HOME=/home/kanthai
+      - NODE_PATH=/home/kanthai/.npm-global/lib/node_modules
+    volumes:
+      - /mnt/TRUENAS_POOL/agent-data/openclaw:/home/kanthai/.openclaw
+      - /mnt/TRUENAS_POOL/agent-data/npm-global:/home/kanthai/.npm-global:ro
+      - /mnt/TRUENAS_POOL/agent-data/config:/home/kanthai/.config:ro
+      - /mnt/TRUENAS_POOL/agent-data/vault:/home/kanthai/vault:ro
+
+  hermes:
+    build: ./hermes
+    container_name: hermes
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - HOME=/home/kanthai
+    volumes:
+      - /mnt/TRUENAS_POOL/agent-data/hermes:/home/kanthai/.hermes
+      - /mnt/TRUENAS_POOL/agent-data/config:/home/kanthai/.config:ro

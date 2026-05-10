@@ -1,0 +1,16 @@
+[Unit]
+Description=Waydroid session on Xvfb/Weston
+After=weston-xvfb.service
+Requires=weston-xvfb.service
+
+[Service]
+Type=simple
+User=kanthai
+Environment=WAYLAND_DISPLAY=wayland-0
+ExecStart=/usr/bin/waydroid session start
+ExecStop=/usr/bin/waydroid session stop
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
