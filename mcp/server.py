@@ -17,6 +17,9 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+import uvicorn
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 from mcp.server import FastMCP
 
 
@@ -34,6 +37,8 @@ from line_db import download_media, extract_cached_media, find_person, get_chat,
 server = FastMCP(
     name="line-mcp",
     instructions="Read-only MCP server for LINE chats stored in a Waydroid container.",
+    host="0.0.0.0",
+    port=8765,
 )
 
 _line_call_gate = threading.BoundedSemaphore(
@@ -366,8 +371,9 @@ def set_auth_token_tool(x_line_access: str) -> dict[str, str]:
     """
     Store a fresh X-Line-Access token for E2EE CDN downloads.
 
-    The token is session-scoped and must be re-captured after LINE restarts.
-    Capture it with: python3 -u tools/refresh_token.py
+    The token is session-scoped. Use refresh_cdn_token first — it reads the
+    live token directly from LINE's SQLite database without manual capture.
+    Only use this tool when refresh_cdn_token fails (e.g. LINE hasn't started yet).
     The token will be persisted to ~/.config/line-mcp/auth.json.
     """
     save_auth_token(x_line_access)
@@ -421,8 +427,33 @@ def get_message_raw_tool(message_id: int) -> dict[str, Any]:
     return get_message_raw(message_id)
 
 
+class _BearerAuthMiddleware:
+    """Pure ASGI middleware — safe for SSE/streaming (BaseHTTPMiddleware breaks SSE)."""
+
+    def __init__(self, app, api_key: str):
+        self.app = app
+        self._api_key = api_key
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            headers = {k.lower(): v for k, v in scope.get("headers", [])}
+            auth = headers.get(b"authorization", b"").decode()
+            qs = scope.get("query_string", b"").decode()
+            qparams = dict(p.split("=", 1) for p in qs.split("&") if "=" in p)
+            header_ok = auth.startswith("Bearer ") and auth[7:] == self._api_key
+            query_ok = qparams.get("key", "") == self._api_key
+            if not (header_ok or query_ok):
+                await JSONResponse({"error": "unauthorized"}, status_code=401)(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
 def main() -> None:
-    server.run(transport="sse", host="0.0.0.0", port=8765)
+    api_key = os.environ.get("LINE_MCP_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("LINE_MCP_API_KEY environment variable is not set")
+    app = _BearerAuthMiddleware(server.sse_app(), api_key=api_key)
+    uvicorn.run(app, host="0.0.0.0", port=8765)
 
 
 if __name__ == "__main__":

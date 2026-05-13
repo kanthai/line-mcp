@@ -5,4 +5,9 @@ Wants=waydroid-watchdog.service
 
 [Service]
 Type=oneshot
-ExecStart=/home/kanthai/line-mcp/tools/line-token-refresh.sh
+User=root
+Environment=HOME=/home/kanthai
+WorkingDirectory=/home/kanthai/line-mcp
+ExecStart=/home/kanthai/line-mcp/venv/bin/python3 /home/kanthai/line-mcp/tools/refresh_token.py
+StandardOutput=journal
+StandardError=journal

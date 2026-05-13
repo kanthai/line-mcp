@@ -7,7 +7,10 @@ Requires=waydroid-session-xvfb.service
 Type=simple
 User=kanthai
 WorkingDirectory=/home/kanthai/line-mcp
+Environment=DISPLAY=:0
 Environment=WAYLAND_DISPLAY=wayland-0
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=LINE_MCP_API_KEY=REDACTED_ROTATED_2026-08-26
 ExecStart=/home/kanthai/line-mcp/venv/bin/python3 /home/kanthai/line-mcp/mcp/server.py
 Restart=always
 RestartSec=10

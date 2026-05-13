@@ -1,0 +1,9 @@
+[Unit]
+Description=LINE Triage — run at 08:00, 14:00, 20:00 Bangkok time (UTC+7 = 01:00, 07:00, 13:00 UTC)
+
+[Timer]
+OnCalendar=*-*-* 01,07,13:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

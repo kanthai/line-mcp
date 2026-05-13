@@ -1,0 +1,19 @@
+[Unit]
+Description=Clinic Schedule Agent
+After=network.target
+
+[Service]
+Type=simple
+User=kanthai
+WorkingDirectory=/home/kanthai/workspace/clinic-schedule-agent
+Environment=PATH=/home/kanthai/.local/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=/home/kanthai/workspace/shared/models.env
+EnvironmentFile=/home/kanthai/workspace/clinic-schedule-agent/.env
+ExecStart=/home/kanthai/workspace/clinic-schedule-agent/.venv/bin/python3 /home/kanthai/workspace/clinic-schedule-agent/main.py
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

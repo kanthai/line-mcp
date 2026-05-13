@@ -1,0 +1,11 @@
+[Unit]
+Description=line-mcp watchdog health check
+After=line-mcp-sse.service
+
+[Service]
+Type=oneshot
+User=root
+EnvironmentFile=/etc/line-mcp-watchdog.env
+ExecStart=/home/kanthai/line-mcp/systemd/line-mcp-watchdog.sh
+StandardOutput=journal
+StandardError=journal

@@ -1,8 +1,10 @@
 [Unit]
-Description=Waydroid session watchdog
+Description=Recover Waydroid session when it drops
+After=multi-user.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/waydroid-watchdog.sh
+User=root
+ExecStart=/home/kanthai/line-mcp/tools/waydroid-watchdog-vm.sh
 StandardOutput=journal
 StandardError=journal

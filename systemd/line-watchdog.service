@@ -1,8 +1,13 @@
 [Unit]
-Description=LINE process watchdog
+Description=Keep LINE running inside Waydroid and verify SSE endpoint
+After=multi-user.target
+After=waydroid-watchdog.service
+Wants=waydroid-watchdog.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/line-watchdog.sh
+User=root
+EnvironmentFile=/etc/line-mcp-watchdog.env
+ExecStart=/home/kanthai/line-mcp/tools/line-watchdog-vm.sh
 StandardOutput=journal
 StandardError=journal
