@@ -452,7 +452,7 @@ def main() -> None:
     api_key = os.environ.get("LINE_MCP_API_KEY", "")
     if not api_key:
         raise RuntimeError("LINE_MCP_API_KEY environment variable is not set")
-    app = _BearerAuthMiddleware(server.sse_app(), api_key=api_key)
+    app = _BearerAuthMiddleware(server.streamable_http_app(), api_key=api_key)
     uvicorn.run(app, host="0.0.0.0", port=8765)
 
 
