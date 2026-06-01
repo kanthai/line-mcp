@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""LINE MCP stdio server.
+"""LINE MCP server.
 
-Exposes read-only tools over the Waydroid LINE SQLite databases.
+Exposes read-only tools over the LINE data mirror (Postgres on CT101, via line-sync-postgres).
+Media decryption still reads from the live Redroid SQLite DB for CDN token auth.
 """
 
 from __future__ import annotations
 
+import hmac
 import json
 import functools
 import os
@@ -16,6 +18,7 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 import uvicorn
 from starlette.requests import Request
@@ -462,8 +465,8 @@ class _BearerAuthMiddleware:
             auth = headers.get(b"authorization", b"").decode()
             qs = scope.get("query_string", b"").decode()
             qparams = dict(p.split("=", 1) for p in qs.split("&") if "=" in p)
-            header_ok = auth.startswith("Bearer ") and auth[7:] == self._api_key
-            query_ok = qparams.get("key", "") == self._api_key
+            header_ok = auth.startswith("Bearer ") and hmac.compare_digest(auth[7:], self._api_key)
+            query_ok = hmac.compare_digest(unquote(qparams.get("key", "")), self._api_key)
             if not (header_ok or query_ok):
                 await JSONResponse({"error": "unauthorized"}, status_code=401)(scope, receive, send)
                 return

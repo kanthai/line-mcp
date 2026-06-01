@@ -286,11 +286,11 @@ def _s(val: str) -> str:
 def _unread_count_sql(alias: str = "c") -> str:
     quote = chr(39)
     if os.environ.get("LINE_MCP_DB_MODE", "auto").strip().lower() == "postgres":
-        # unread_type_and_count can be "COUPON\t2", "MENTION\t1", "5", or ""
-        # regexp_replace strips everything from the first non-digit onwards, giving "" or a number
+        # unread_type_and_count values: "5" (plain count), "COUPON\t2" / "MENTION\t1" (TYPE\tN), ""
+        # substring with capture group extracts trailing digits: "COUPON\t2"→"2", "5"→"5", ""→NULL→0
         typed = (
-            f"COALESCE(NULLIF(regexp_replace({alias}.unread_type_and_count,"
-            f" {quote}[^0-9].*${quote}, {quote}{quote}), {quote}{quote})::bigint, 0)"
+            f"COALESCE(substring(COALESCE({alias}.unread_type_and_count, ''),"
+            f" E'([0-9]+)$')::bigint, 0)"
         )
         delta = (
             f"GREATEST("
