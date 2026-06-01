@@ -181,28 +181,27 @@ def _connect_readonly(path: Path) -> sqlite3.Connection:
     return conn
 
 
-_pg_conn_dsn: str = ""
-_pg_conn_obj = None  # cached psycopg connection
+_pg_pool = None  # psycopg_pool.ConnectionPool, lazily created
 
 
-def _get_pg_conn(dsn: str):
-    """Return a cached long-lived psycopg connection; reconnect if closed or DSN changed."""
-    global _pg_conn_dsn, _pg_conn_obj
+def _ensure_pool(dsn: str):
+    """Lazily create and return a module-level ConnectionPool for the given DSN."""
+    global _pg_pool
     import psycopg
     from psycopg.rows import dict_row
-    if _pg_conn_obj is not None and not _pg_conn_obj.closed and _pg_conn_dsn == dsn:
-        return _pg_conn_obj
-    if _pg_conn_obj is not None:
-        try:
-            _pg_conn_obj.close()
-        except Exception:
-            pass
-    _pg_conn_obj = psycopg.connect(
-        dsn, row_factory=dict_row, autocommit=True,
-        options="-c client_encoding=UTF8 -c search_path=line_raw,cdb,public",
-    )
-    _pg_conn_dsn = dsn
-    return _pg_conn_obj
+    from psycopg_pool import ConnectionPool
+    if _pg_pool is None:
+        _pg_pool = ConnectionPool(
+            dsn,
+            min_size=1,
+            max_size=3,
+            kwargs={
+                "row_factory": dict_row,
+                "autocommit": True,
+                "options": "-c client_encoding=UTF8 -c search_path=line_raw,cdb,public",
+            },
+        )
+    return _pg_pool
 
 
 def _query_via_postgres(sql: str, attach_contact: bool = False) -> list[dict]:
@@ -213,32 +212,34 @@ def _query_via_postgres(sql: str, attach_contact: bool = False) -> list[dict]:
     #   COALESCE(text_col, 0) → COALESCE(text_col, '0')  (text vs int type mismatch)
     #   AS INTEGER → AS BIGINT  (epoch-ms timestamps exceed 32-bit)
     #   LIKE → ILIKE  (Postgres LIKE is case-sensitive unlike SQLite)
+    import psycopg
     zero = chr(39) + "0" + chr(39)
     sql = re.sub(r"COALESCE\(([^,()]+(?:\([^)]*\))?[^,]*),\s*0\)", lambda m: f"COALESCE({m.group(1)}, {zero})", sql)
     sql = sql.replace("AS INTEGER", "AS BIGINT")
     sql = sql.replace(" LIKE ", " ILIKE ")
     for attempt in range(2):
         try:
-            conn = _get_pg_conn(dsn)
-            with conn.cursor() as cur:
-                cur.execute(sql)
-                if not cur.description:
-                    return []
-                out = []
-                for row in cur.fetchall():
-                    item = {}
-                    for key, value in dict(row).items():
-                        if isinstance(value, (bytes, bytearray, memoryview)):
-                            value = bytes(value).decode("utf-8", errors="replace")
-                        item[key] = value
-                    out.append(item)
-                return out
-        except Exception:
+            with _ensure_pool(dsn).connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(sql)
+                    if not cur.description:
+                        return []
+                    out = []
+                    for row in cur.fetchall():
+                        item = {}
+                        for key, value in dict(row).items():
+                            if isinstance(value, (bytes, bytearray, memoryview)):
+                                value = bytes(value).decode("utf-8", errors="replace")
+                            item[key] = value
+                        out.append(item)
+                    return out
+        except (psycopg.OperationalError, psycopg.InterfaceError):
             if attempt == 0:
-                global _pg_conn_obj  # noqa: PLW0603
-                _pg_conn_obj = None
+                # connection broken; pool will create a fresh one on next get
                 continue
             raise
+        except Exception:
+            raise  # query errors (ProgrammingError, DataError, etc.) — fail immediately
 
 
 def _query_via_direct_db(sql: str, attach_contact: bool = False) -> list[dict]:
@@ -841,10 +842,10 @@ def find_person(query: str, limit: int = 20, message_limit: int = 20) -> dict[st
             c.chat_id,
             COALESCE(g.name, con.overridden_name, con.profile_name, c.chat_name, '') AS chat_name,
             CASE
-                WHEN lower(COALESCE(g.name, '')) LIKE '%{q}%' THEN 'group_name'
-                WHEN lower(COALESCE(con.overridden_name, '')) LIKE '%{q}%'
-                  OR lower(COALESCE(con.profile_name, '')) LIKE '%{q}%'
-                  OR lower(COALESCE(c.chat_name, '')) LIKE '%{q}%' THEN 'chat_name'
+                WHEN COALESCE(g.name, '') ILIKE '%{q}%' THEN 'group_name'
+                WHEN COALESCE(con.overridden_name, '') ILIKE '%{q}%'
+                  OR COALESCE(con.profile_name, '') ILIKE '%{q}%'
+                  OR COALESCE(c.chat_name, '') ILIKE '%{q}%' THEN 'chat_name'
                 ELSE 'unknown'
             END AS match_kind,
             c.chat_id AS matched_id,
@@ -854,8 +855,8 @@ def find_person(query: str, limit: int = 20, message_limit: int = 20) -> dict[st
         FROM chat c
         LEFT JOIN groups g         ON g.id = c.chat_id
         LEFT JOIN cdb.contacts con ON con.mid = c.chat_id
-        WHERE lower(COALESCE(g.name, '') || ' ' || COALESCE(con.overridden_name, '') || ' ' ||
-                    COALESCE(con.profile_name, '') || ' ' || COALESCE(c.chat_name, '')) LIKE '%{q}%'
+        WHERE (COALESCE(g.name, '') || ' ' || COALESCE(con.overridden_name, '') || ' ' ||
+                    COALESCE(con.profile_name, '') || ' ' || COALESCE(c.chat_name, '')) ILIKE '%{q}%'
         ORDER BY CAST(COALESCE(c.last_created_time, 0) AS INTEGER) DESC
         LIMIT {int(limit)}
     """, attach_contact=True)
@@ -877,8 +878,8 @@ def find_person(query: str, limit: int = 20, message_limit: int = 20) -> dict[st
         LEFT JOIN cdb.contacts con  ON con.mid = h.chat_id
         LEFT JOIN cdb.contacts scon ON scon.mid = h.from_mid
         WHERE COALESCE(h.from_mid, '') != ''
-          AND lower(COALESCE(scon.overridden_name, '') || ' ' ||
-                    COALESCE(scon.profile_name, '') || ' ' || COALESCE(h.from_mid, '')) LIKE '%{q}%'
+          AND (COALESCE(scon.overridden_name, '') || ' ' ||
+                    COALESCE(scon.profile_name, '') || ' ' || COALESCE(h.from_mid, '')) ILIKE '%{q}%'
         ORDER BY CAST(COALESCE(h.created_time, 0) AS INTEGER) DESC
         LIMIT {int(message_limit)}
     """, attach_contact=True)
@@ -898,9 +899,12 @@ def find_person(query: str, limit: int = 20, message_limit: int = 20) -> dict[st
         LEFT JOIN cdb.contacts con  ON con.mid = h.chat_id
         LEFT JOIN cdb.contacts scon ON scon.mid = h.from_mid
         WHERE COALESCE(h.from_mid, '') != ''
-          AND lower(COALESCE(scon.overridden_name, '') || ' ' ||
-                    COALESCE(scon.profile_name, '') || ' ' || COALESCE(h.from_mid, '')) LIKE '%{q}%'
-        GROUP BY h.chat_id, h.from_mid
+          AND (COALESCE(scon.overridden_name, '') || ' ' ||
+                    COALESCE(scon.profile_name, '') || ' ' || COALESCE(h.from_mid, '')) ILIKE '%{q}%'
+        GROUP BY h.chat_id, h.from_mid,
+                 g.name, con.overridden_name, con.profile_name, c.chat_name,
+                 scon.overridden_name, scon.profile_name,
+                 c.message_count, c.read_message_count, c.unread_type_and_count
         ORDER BY last_message_at DESC
         LIMIT {int(limit)}
     """, attach_contact=True)

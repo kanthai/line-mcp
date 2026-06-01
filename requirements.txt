@@ -2,3 +2,4 @@ cryptography
 requests
 mcp[cli]
 psycopg[binary]
+psycopg-pool
