@@ -1,3 +1,4 @@
 cryptography
 requests
 mcp[cli]
+psycopg[binary]
