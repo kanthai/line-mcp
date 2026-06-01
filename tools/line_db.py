@@ -1215,7 +1215,12 @@ def list_group_members(chat_id: str, limit: int = 200) -> list[GroupMember]:
 
 
 def list_contacts(query: str | None = None, limit: int = 50) -> list[Contact]:
-    """Browse LINE contacts. Pass query to filter by name."""
+    """Browse LINE contacts (all people LINE has tracked, including those you've chatted with but not added).
+
+    friend_type: 0 = chatted but not explicitly added as friend,
+                 1 = explicitly added LINE friend,
+                 2 = official account or blocked.
+    """
     like = _like_op()
     conds: list[str] = []
     if query:
@@ -1275,7 +1280,7 @@ def get_chat_stats(chat_id: str, days: int = 7) -> ChatStats:
         FROM chat_history h
         WHERE h.chat_id = '{_s(chat_id)}'
           AND h.created_time >= {since_ms}
-        GROUP BY hour
+        GROUP BY 1
         ORDER BY cnt DESC
         LIMIT 1
     """)
@@ -1292,7 +1297,7 @@ def get_chat_stats(chat_id: str, days: int = 7) -> ChatStats:
         FROM chat_history h
         WHERE h.chat_id = '{_s(chat_id)}'
           AND h.created_time >= {since_ms}
-        GROUP BY day
+        GROUP BY 1
         ORDER BY day ASC
     """)
 

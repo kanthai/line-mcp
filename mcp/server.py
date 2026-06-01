@@ -494,7 +494,7 @@ def list_group_members_tool(chat_id: str, limit: int = 200) -> list[dict[str, An
     """List members of a group chat with their contact names and friend status.
 
     Returns mid, display_name, profile_name, overridden_name, friend_type, contact_type.
-    friend_type: 1 = friend in your contact list, 0 = not a contact.
+    friend_type: 0 = chatted/not added as friend, 1 = explicit LINE friend, 2 = official/blocked.
     Only works for group chats (chat_id starting with 'c').
     """
     return [asdict(m) for m in list_group_members(chat_id=chat_id, limit=_limit(limit, default=200, maximum=500))]
@@ -504,6 +504,12 @@ def list_group_members_tool(chat_id: str, limit: int = 200) -> list[dict[str, An
 @_serialized_line_call
 def list_contacts_tool(query: str = "", limit: int = 50) -> list[dict[str, Any]]:
     """Browse LINE contacts. Pass query to filter by name (case-insensitive).
+
+    Includes everyone LINE has tracked: explicit friends AND people you've chatted
+    with who aren't in your friends list. Use friend_type to distinguish:
+      0 = chatted but not added as friend  (largest group)
+      1 = explicit LINE friend
+      2 = official account or blocked
 
     Returns mid, display_name, profile_name, overridden_name, friend_type, contact_type,
     status_message, friend_created_at (epoch ms).
