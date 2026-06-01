@@ -1191,18 +1191,23 @@ def search_messages(
 
 
 def list_group_members(chat_id: str, limit: int = 200) -> list[GroupMember]:
-    """List members of a group chat with their contact names."""
+    """List accepted members of a group chat (chat_id starting with 'c') with contact names.
+
+    Uses the membership table (id=group_id, m_id=member_mid, is_accepted=1).
+    Requires membership to be synced to Postgres (it is, as of 2026-06-01).
+    """
     rows = _q(f"""
         SELECT
-            cm.mid,
-            COALESCE(con.overridden_name, con.profile_name, cm.mid, '') AS display_name,
-            COALESCE(con.profile_name, '')    AS profile_name,
-            COALESCE(con.overridden_name, '') AS overridden_name,
-            CAST(COALESCE(con.friend_type, 0) AS BIGINT)   AS friend_type,
-            CAST(COALESCE(con.contact_type, 0) AS BIGINT)  AS contact_type
-        FROM chat_member cm
-        LEFT JOIN cdb.contacts con ON con.mid = cm.mid
-        WHERE cm.chat_id = '{_s(chat_id)}'
+            ms.m_id                                                           AS mid,
+            COALESCE(con.overridden_name, con.profile_name, ms.m_id, '')      AS display_name,
+            COALESCE(con.profile_name, '')                                    AS profile_name,
+            COALESCE(con.overridden_name, '')                                 AS overridden_name,
+            CAST(COALESCE(con.friend_type, 0) AS BIGINT)                      AS friend_type,
+            CAST(COALESCE(con.contact_type, 0) AS BIGINT)                     AS contact_type
+        FROM membership ms
+        LEFT JOIN cdb.contacts con ON con.mid = ms.m_id
+        WHERE ms.id = '{_s(chat_id)}'
+          AND ms.is_accepted = 1
         ORDER BY display_name
         LIMIT {int(limit)}
     """, attach_contact=True)
