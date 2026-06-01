@@ -565,7 +565,7 @@ def _media_rows(where_sql: str, limit: int) -> list[dict]:
             OR COALESCE(h.attachement_image, 0) != 0
         )
         {where_sql}
-        ORDER BY CAST(COALESCE(h.created_time, 0) AS INTEGER) DESC
+        ORDER BY h.created_time DESC
         LIMIT {int(limit)}
     """, attach_contact=True)
 
@@ -601,7 +601,7 @@ def list_chats(limit: int = 50) -> list[Chat]:
         FROM chat c
         LEFT JOIN groups g        ON g.id    = c.chat_id
         LEFT JOIN cdb.contacts con ON con.mid = c.chat_id
-        ORDER BY CAST(COALESCE(c.last_created_time, 0) AS INTEGER) DESC
+        ORDER BY c.last_created_time DESC
         LIMIT {int(limit)}
     """, attach_contact=True)
     return [Chat(**r) for r in rows]
@@ -620,7 +620,7 @@ def list_unread_chats(limit: int = 50) -> list[Chat]:
         LEFT JOIN groups g         ON g.id = c.chat_id
         LEFT JOIN cdb.contacts con ON con.mid = c.chat_id
         WHERE {unread_count} > 0
-        ORDER BY CAST(COALESCE(c.last_created_time, 0) AS INTEGER) DESC
+        ORDER BY c.last_created_time DESC
         LIMIT {int(limit)}
     """, attach_contact=True)
     return [Chat(**r) for r in rows]
@@ -658,7 +658,7 @@ def get_messages(chat_id: str, limit: int = 50) -> list[Message]:
         FROM chat_history h
         LEFT JOIN cdb.contacts scon ON scon.mid = h.from_mid
         WHERE h.chat_id = '{_s(chat_id)}'
-        ORDER BY CAST(COALESCE(h.created_time, 0) AS INTEGER) DESC
+        ORDER BY h.created_time DESC
         LIMIT {int(limit)}
     """, attach_contact=True)
     return [Message(**r) for r in rows]
@@ -683,7 +683,7 @@ def list_latest_inbound_messages(limit: int = 10) -> list[InboundMessage]:
         LEFT JOIN cdb.contacts con ON con.mid = h.chat_id
         LEFT JOIN cdb.contacts scon ON scon.mid = h.from_mid
         WHERE COALESCE(h.from_mid, '') != ''
-        ORDER BY CAST(COALESCE(h.created_time, 0) AS INTEGER) DESC
+        ORDER BY h.created_time DESC
         LIMIT {int(limit)}
     """, attach_contact=True)
     return [InboundMessage(**r) for r in rows]
@@ -694,17 +694,16 @@ def list_reply_candidates(limit: int = 25) -> list[ReplyCandidate]:
     unread_count = _unread_count_sql("c")
     rows = _q(f"""
         WITH latest_inbound AS (
-            SELECT h.*
-            FROM chat_history h
-            JOIN (
-                SELECT chat_id, MAX(CAST(COALESCE(created_time, 0) AS INTEGER)) AS latest_inbound_at
-                FROM chat_history
-                WHERE COALESCE(from_mid, '') != ''
-                GROUP BY chat_id
-            ) li ON li.chat_id = h.chat_id
-                AND CAST(COALESCE(h.created_time, 0) AS INTEGER) = li.latest_inbound_at
-            WHERE COALESCE(h.from_mid, '') != ''
-            GROUP BY h.chat_id
+            SELECT * FROM (
+                SELECT h.*,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY h.chat_id
+                           ORDER BY CAST(COALESCE(h.created_time, 0) AS INTEGER) DESC,
+                                    CAST(COALESCE(h.id, 0) AS INTEGER) DESC
+                       ) AS _rn
+                FROM chat_history h
+                WHERE COALESCE(h.from_mid, '') != ''
+            ) _ranked WHERE _rn = 1
         ),
         latest_outgoing AS (
             SELECT
@@ -740,7 +739,7 @@ def list_reply_candidates(limit: int = 25) -> list[ReplyCandidate]:
         LEFT JOIN cdb.contacts con   ON con.mid = li.chat_id
         LEFT JOIN cdb.contacts scon  ON scon.mid = li.from_mid
         WHERE CAST(COALESCE(li.created_time, 0) AS INTEGER) > CAST(COALESCE(lo.latest_outgoing_at, 0) AS INTEGER)
-        ORDER BY CAST(COALESCE(li.created_time, 0) AS INTEGER) DESC
+        ORDER BY li.created_time DESC
         LIMIT {int(limit)}
     """, attach_contact=True)
     return [ReplyCandidate(**r) for r in rows]
@@ -779,7 +778,7 @@ def get_message_context(message_id: int, before: int = 10, after: int = 5) -> di
         LEFT JOIN cdb.contacts scon ON scon.mid = h.from_mid
         WHERE h.chat_id = '{_s(chat_id)}'
           AND CAST(COALESCE(h.created_time, 0) AS INTEGER) < {created_at}
-        ORDER BY CAST(COALESCE(h.created_time, 0) AS INTEGER) DESC
+        ORDER BY h.created_time DESC
         LIMIT {before_limit}
     """, attach_contact=True)
     target_message = _q(f"""
@@ -811,7 +810,7 @@ def get_message_context(message_id: int, before: int = 10, after: int = 5) -> di
         LEFT JOIN cdb.contacts scon ON scon.mid = h.from_mid
         WHERE h.chat_id = '{_s(chat_id)}'
           AND CAST(COALESCE(h.created_time, 0) AS INTEGER) > {created_at}
-        ORDER BY CAST(COALESCE(h.created_time, 0) AS INTEGER) ASC
+        ORDER BY h.created_time ASC
         LIMIT {after_limit}
     """, attach_contact=True)
 
@@ -857,7 +856,7 @@ def find_person(query: str, limit: int = 20, message_limit: int = 20) -> dict[st
         LEFT JOIN cdb.contacts con ON con.mid = c.chat_id
         WHERE (COALESCE(g.name, '') || ' ' || COALESCE(con.overridden_name, '') || ' ' ||
                     COALESCE(con.profile_name, '') || ' ' || COALESCE(c.chat_name, '')) ILIKE '%{q}%'
-        ORDER BY CAST(COALESCE(c.last_created_time, 0) AS INTEGER) DESC
+        ORDER BY c.last_created_time DESC
         LIMIT {int(limit)}
     """, attach_contact=True)
 
@@ -880,7 +879,7 @@ def find_person(query: str, limit: int = 20, message_limit: int = 20) -> dict[st
         WHERE COALESCE(h.from_mid, '') != ''
           AND (COALESCE(scon.overridden_name, '') || ' ' ||
                     COALESCE(scon.profile_name, '') || ' ' || COALESCE(h.from_mid, '')) ILIKE '%{q}%'
-        ORDER BY CAST(COALESCE(h.created_time, 0) AS INTEGER) DESC
+        ORDER BY h.created_time DESC
         LIMIT {int(message_limit)}
     """, attach_contact=True)
 
@@ -968,8 +967,8 @@ def summarize_recent_activity(
                     r.*,
                     ROW_NUMBER() OVER (
                         PARTITION BY r.chat_id
-                        ORDER BY CAST(COALESCE(r.created_time, 0) AS INTEGER) DESC,
-                                 CAST(COALESCE(r.id, 0) AS INTEGER) DESC
+                        ORDER BY r.created_time DESC,
+                                 r.id DESC
                     ) AS rn
                 FROM recent r
             ) ranked
@@ -1053,8 +1052,8 @@ def summarize_recent_activity(
                     COALESCE(CAST(h.server_id AS TEXT), CAST(h.id AS TEXT)) AS server_id,
                     ROW_NUMBER() OVER (
                         PARTITION BY h.chat_id
-                        ORDER BY CAST(COALESCE(h.created_time, 0) AS INTEGER) DESC,
-                                 CAST(COALESCE(h.id, 0) AS INTEGER) DESC
+                        ORDER BY h.created_time DESC,
+                                 h.id DESC
                     ) AS rn
                 FROM chat_history h
                 LEFT JOIN cdb.contacts scon ON scon.mid = h.from_mid
@@ -1095,7 +1094,7 @@ def search_messages(query: str, limit: int = 20) -> list[Message]:
         FROM chat_history h
         LEFT JOIN cdb.contacts scon ON scon.mid = h.from_mid
         WHERE h.content LIKE '%{_s(query)}%'
-        ORDER BY CAST(COALESCE(h.created_time, 0) AS INTEGER) DESC
+        ORDER BY h.created_time DESC
         LIMIT {int(limit)}
     """, attach_contact=True)
     return [Message(**r) for r in rows]
