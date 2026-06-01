@@ -213,6 +213,12 @@ def _like_op() -> str:
     return "LIKE"
 
 
+def _is_pg() -> bool:
+    """True when the current DB mode will route to Postgres."""
+    mode = os.environ.get("LINE_MCP_DB_MODE", "auto").strip().lower()
+    return mode == "postgres" or (mode == "auto" and bool(os.environ.get("DATABASE_URL")))
+
+
 def _query_via_postgres(sql: str, attach_contact: bool = False) -> list[dict]:
     dsn = os.environ.get("DATABASE_URL", "").strip()
     if not dsn:
@@ -404,6 +410,54 @@ class Media:
     server_id: str     # server-side message ID (needed for X-Talk-Meta CDN auth)
     km_b64: str        # base64 KM (plaintext, cached by LINE post-decrypt) — empty for non-E2EE
     sid: str           # CDN storage shard ID (e.g. "emi") — needed for CDN URL construction
+
+
+@dataclass
+class GroupMember:
+    mid: str
+    display_name: str
+    profile_name: str
+    overridden_name: str
+    friend_type: int
+    contact_type: int
+
+
+@dataclass
+class Contact:
+    mid: str
+    display_name: str
+    profile_name: str
+    overridden_name: str
+    friend_type: int
+    contact_type: int
+    status_message: str
+    friend_created_at: int   # unix ms
+
+
+@dataclass
+class DayStat:
+    date: str    # "2026-06-01" Bangkok local date
+    total: int
+    inbound: int
+    outgoing: int
+    media: int
+
+
+@dataclass
+class ChatStats:
+    chat_id: str
+    chat_name: str
+    days: int
+    since_ms: int
+    total: int
+    inbound: int
+    outgoing: int
+    media: int
+    unique_senders: int
+    first_message_at: int
+    last_message_at: int
+    busiest_hour: int        # Bangkok local hour 0-23
+    daily: list
 
 
 def _parse_parameter_blob(blob: str | None) -> dict[str, str]:
@@ -645,7 +699,22 @@ def get_chat(chat_id: str) -> Chat | None:
     return Chat(**rows[0]) if rows else None
 
 
-def get_messages(chat_id: str, limit: int = 50) -> list[Message]:
+def get_messages(
+    chat_id: str,
+    limit: int = 50,
+    before_id: int | None = None,
+    since_ms: int | None = None,
+    until_ms: int | None = None,
+) -> list[Message]:
+    """Get messages for a chat. Use before_id for keyset pagination, since_ms/until_ms for time ranges."""
+    conds = [f"h.chat_id = '{_s(chat_id)}'"]
+    if before_id is not None:
+        conds.append(f"h.id < {int(before_id)}")
+    if since_ms is not None:
+        conds.append(f"h.created_time >= {int(since_ms)}")
+    if until_ms is not None:
+        conds.append(f"h.created_time <= {int(until_ms)}")
+    where = " AND ".join(conds)
     rows = _q(f"""
         SELECT
             h.id                                              AS message_id,
@@ -658,7 +727,7 @@ def get_messages(chat_id: str, limit: int = 50) -> list[Message]:
             COALESCE(CAST(h.server_id AS TEXT), CAST(h.id AS TEXT)) AS server_id
         FROM chat_history h
         LEFT JOIN cdb.contacts scon ON scon.mid = h.from_mid
-        WHERE h.chat_id = '{_s(chat_id)}'
+        WHERE {where}
         ORDER BY h.created_time DESC
         LIMIT {int(limit)}
     """, attach_contact=True)
@@ -1082,7 +1151,26 @@ def summarize_recent_activity(
     }
 
 
-def search_messages(query: str, limit: int = 20) -> list[Message]:
+def search_messages(
+    query: str,
+    limit: int = 20,
+    chat_id: str | None = None,
+    sender_id: str | None = None,
+    since_ms: int | None = None,
+    until_ms: int | None = None,
+) -> list[Message]:
+    """Search message text. Optionally scope to a chat, sender, or time range."""
+    like = _like_op()
+    conds = [f"h.content {like} '%{_s(query)}%'"]
+    if chat_id:
+        conds.append(f"h.chat_id = '{_s(chat_id)}'")
+    if sender_id:
+        conds.append(f"COALESCE(h.from_mid, '') = '{_s(sender_id)}'")
+    if since_ms is not None:
+        conds.append(f"h.created_time >= {int(since_ms)}")
+    if until_ms is not None:
+        conds.append(f"h.created_time <= {int(until_ms)}")
+    where = " AND ".join(conds)
     rows = _q(f"""
         SELECT
             h.id                                              AS message_id,
@@ -1095,11 +1183,141 @@ def search_messages(query: str, limit: int = 20) -> list[Message]:
             COALESCE(CAST(h.server_id AS TEXT), CAST(h.id AS TEXT)) AS server_id
         FROM chat_history h
         LEFT JOIN cdb.contacts scon ON scon.mid = h.from_mid
-        WHERE h.content {_like_op()} '%{_s(query)}%'
+        WHERE {where}
         ORDER BY h.created_time DESC
         LIMIT {int(limit)}
     """, attach_contact=True)
     return [Message(**r) for r in rows]
+
+
+def list_group_members(chat_id: str, limit: int = 200) -> list[GroupMember]:
+    """List members of a group chat with their contact names."""
+    rows = _q(f"""
+        SELECT
+            cm.mid,
+            COALESCE(con.overridden_name, con.profile_name, cm.mid, '') AS display_name,
+            COALESCE(con.profile_name, '')    AS profile_name,
+            COALESCE(con.overridden_name, '') AS overridden_name,
+            CAST(COALESCE(con.friend_type, 0) AS BIGINT)   AS friend_type,
+            CAST(COALESCE(con.contact_type, 0) AS BIGINT)  AS contact_type
+        FROM chat_member cm
+        LEFT JOIN cdb.contacts con ON con.mid = cm.mid
+        WHERE cm.chat_id = '{_s(chat_id)}'
+        ORDER BY display_name
+        LIMIT {int(limit)}
+    """, attach_contact=True)
+    return [GroupMember(**r) for r in rows]
+
+
+def list_contacts(query: str | None = None, limit: int = 50) -> list[Contact]:
+    """Browse LINE contacts. Pass query to filter by name."""
+    like = _like_op()
+    conds: list[str] = []
+    if query:
+        q = _s(query.strip().lower())
+        conds.append(
+            f"(COALESCE(con.overridden_name, '') || ' ' || COALESCE(con.profile_name, '')) {like} '%{q}%'"
+        )
+    where = ("WHERE " + " AND ".join(conds)) if conds else ""
+    rows = _q(f"""
+        SELECT
+            con.mid,
+            COALESCE(con.overridden_name, con.profile_name, con.mid, '') AS display_name,
+            COALESCE(con.profile_name, '')    AS profile_name,
+            COALESCE(con.overridden_name, '') AS overridden_name,
+            CAST(COALESCE(con.friend_type, 0) AS BIGINT)            AS friend_type,
+            CAST(COALESCE(con.contact_type, 0) AS BIGINT)           AS contact_type,
+            COALESCE(con.status_message, '')                         AS status_message,
+            CAST(COALESCE(con.friend_created_time_millis, 0) AS BIGINT) AS friend_created_at
+        FROM cdb.contacts con
+        {where}
+        ORDER BY display_name
+        LIMIT {int(limit)}
+    """, attach_contact=True)
+    return [Contact(**r) for r in rows]
+
+
+def get_chat_stats(chat_id: str, days: int = 7) -> ChatStats:
+    """Per-chat activity stats: daily message counts, inbound/outgoing split, busiest hour (Bangkok time)."""
+    safe_days = max(1, min(int(days), 365))
+    since_ms = int((time.time() - safe_days * 86400) * 1000)
+
+    if _is_pg():
+        day_expr = "(TO_TIMESTAMP(h.created_time / 1000.0) AT TIME ZONE 'Asia/Bangkok')::date"
+        hour_expr = "DATE_PART('hour', TO_TIMESTAMP(h.created_time / 1000.0) AT TIME ZONE 'Asia/Bangkok')::bigint"
+    else:
+        day_expr = "DATE(h.created_time / 1000, 'unixepoch', '+7 hours')"
+        hour_expr = "CAST(strftime('%H', h.created_time / 1000, 'unixepoch', '+7 hours') AS INTEGER)"
+
+    overview = _q(f"""
+        SELECT
+            COUNT(*) AS total,
+            SUM(CASE WHEN COALESCE(h.from_mid, '') != '' THEN 1 ELSE 0 END) AS inbound,
+            SUM(CASE WHEN COALESCE(h.from_mid, '') = '' THEN 1 ELSE 0 END) AS outgoing,
+            SUM(CASE WHEN COALESCE(h.attachement_type, 0) != 0
+                          OR COALESCE(h.attachement_local_uri, '') != ''
+                          OR COALESCE(h.attachement_image, 0) != 0 THEN 1 ELSE 0 END) AS media,
+            COUNT(DISTINCT CASE WHEN COALESCE(h.from_mid,'') != '' THEN h.from_mid END) AS unique_senders,
+            MIN(h.created_time) AS first_at,
+            MAX(h.created_time) AS last_at
+        FROM chat_history h
+        WHERE h.chat_id = '{_s(chat_id)}'
+          AND h.created_time >= {since_ms}
+    """)
+
+    hours_rows = _q(f"""
+        SELECT {hour_expr} AS hour, COUNT(*) AS cnt
+        FROM chat_history h
+        WHERE h.chat_id = '{_s(chat_id)}'
+          AND h.created_time >= {since_ms}
+        GROUP BY hour
+        ORDER BY cnt DESC
+        LIMIT 1
+    """)
+
+    daily_rows = _q(f"""
+        SELECT
+            {day_expr} AS day,
+            COUNT(*) AS total,
+            SUM(CASE WHEN COALESCE(h.from_mid, '') != '' THEN 1 ELSE 0 END) AS inbound,
+            SUM(CASE WHEN COALESCE(h.from_mid, '') = '' THEN 1 ELSE 0 END) AS outgoing,
+            SUM(CASE WHEN COALESCE(h.attachement_type, 0) != 0
+                          OR COALESCE(h.attachement_local_uri, '') != ''
+                          OR COALESCE(h.attachement_image, 0) != 0 THEN 1 ELSE 0 END) AS media
+        FROM chat_history h
+        WHERE h.chat_id = '{_s(chat_id)}'
+          AND h.created_time >= {since_ms}
+        GROUP BY day
+        ORDER BY day ASC
+    """)
+
+    chat = get_chat(chat_id)
+    ov = overview[0] if overview else {}
+    daily = [
+        DayStat(
+            date=str(r["day"]),
+            total=int(r["total"] or 0),
+            inbound=int(r["inbound"] or 0),
+            outgoing=int(r["outgoing"] or 0),
+            media=int(r["media"] or 0),
+        )
+        for r in daily_rows
+    ]
+    return ChatStats(
+        chat_id=chat_id,
+        chat_name=chat.name if chat else "",
+        days=safe_days,
+        since_ms=since_ms,
+        total=int(ov.get("total") or 0),
+        inbound=int(ov.get("inbound") or 0),
+        outgoing=int(ov.get("outgoing") or 0),
+        media=int(ov.get("media") or 0),
+        unique_senders=int(ov.get("unique_senders") or 0),
+        first_message_at=int(ov.get("first_at") or 0),
+        last_message_at=int(ov.get("last_at") or 0),
+        busiest_hour=int(hours_rows[0]["hour"]) if hours_rows else 0,
+        daily=daily,
+    )
 
 
 def list_media(chat_id: str | None = None, limit: int = 20) -> list[Media]:

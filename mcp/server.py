@@ -39,7 +39,7 @@ import sys
 if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
-from line_db import download_media, extract_cached_media, find_person, get_chat, get_media_info, get_message_context, get_message_raw, get_messages, list_chats, list_latest_inbound_messages, list_media, list_reply_candidates, list_unread_chats, open_chat_and_cache, pull_chat_images, pull_message_image, save_auth_token, search_messages, summarize_recent_activity  # noqa: E402
+from line_db import download_media, extract_cached_media, find_person, get_chat, get_chat_stats, get_media_info, get_message_context, get_message_raw, get_messages, list_chats, list_contacts, list_group_members, list_latest_inbound_messages, list_media, list_reply_candidates, list_unread_chats, open_chat_and_cache, pull_chat_images, pull_message_image, save_auth_token, search_messages, summarize_recent_activity  # noqa: E402
 
 
 server = FastMCP(
@@ -109,9 +109,26 @@ def list_unread_chats_tool(limit: int = 50) -> list[dict[str, Any]]:
 
 @server.tool(name="get_messages")
 @_serialized_line_call
-def get_messages_tool(chat_id: str, limit: int = 50) -> list[dict[str, Any]]:
-    """Get recent messages for one chat_id."""
-    return _to_dicts(get_messages(chat_id=chat_id, limit=_limit(limit, default=50, maximum=200)))
+def get_messages_tool(
+    chat_id: str,
+    limit: int = 50,
+    before_id: int = 0,
+    since_ms: int = 0,
+    until_ms: int = 0,
+) -> list[dict[str, Any]]:
+    """Get messages for one chat_id.
+
+    Pagination: pass before_id (a message_id from a previous result) to page backward.
+    Time range: pass since_ms / until_ms as epoch milliseconds to restrict the window.
+    Omit or pass 0 for any param to use the default (most recent messages).
+    """
+    return _to_dicts(get_messages(
+        chat_id=chat_id,
+        limit=_limit(limit, default=50, maximum=200),
+        before_id=before_id or None,
+        since_ms=since_ms or None,
+        until_ms=until_ms or None,
+    ))
 
 
 @server.tool(name="list_latest_inbound_messages")
@@ -248,9 +265,28 @@ def get_chat_summary_tool(
 
 @server.tool(name="search_messages")
 @_serialized_line_call
-def search_messages_tool(query: str, limit: int = 20) -> list[dict[str, Any]]:
-    """Search message text across chat history."""
-    return _to_dicts(search_messages(query=query, limit=_limit(limit, default=20, maximum=100)))
+def search_messages_tool(
+    query: str,
+    limit: int = 20,
+    chat_id: str = "",
+    sender_id: str = "",
+    since_ms: int = 0,
+    until_ms: int = 0,
+) -> list[dict[str, Any]]:
+    """Search message text. Optionally scope to one chat, sender, or time range.
+
+    chat_id: restrict to one chat (pass "" for global search).
+    sender_id: restrict to one sender's LINE mid (pass "" for all senders).
+    since_ms / until_ms: epoch ms bounds (pass 0 to omit).
+    """
+    return _to_dicts(search_messages(
+        query=query,
+        limit=_limit(limit, default=20, maximum=200),
+        chat_id=chat_id or None,
+        sender_id=sender_id or None,
+        since_ms=since_ms or None,
+        until_ms=until_ms or None,
+    ))
 
 
 @server.tool(name="list_media")
@@ -450,6 +486,46 @@ def get_message_raw_tool(message_id: int) -> dict[str, Any]:
     Returns: message_id, chat_id, sender_id, type, created_at, params (dict).
     """
     return get_message_raw(message_id)
+
+
+@server.tool(name="list_group_members")
+@_serialized_line_call
+def list_group_members_tool(chat_id: str, limit: int = 200) -> list[dict[str, Any]]:
+    """List members of a group chat with their contact names and friend status.
+
+    Returns mid, display_name, profile_name, overridden_name, friend_type, contact_type.
+    friend_type: 1 = friend in your contact list, 0 = not a contact.
+    Only works for group chats (chat_id starting with 'c').
+    """
+    return [asdict(m) for m in list_group_members(chat_id=chat_id, limit=_limit(limit, default=200, maximum=500))]
+
+
+@server.tool(name="list_contacts")
+@_serialized_line_call
+def list_contacts_tool(query: str = "", limit: int = 50) -> list[dict[str, Any]]:
+    """Browse LINE contacts. Pass query to filter by name (case-insensitive).
+
+    Returns mid, display_name, profile_name, overridden_name, friend_type, contact_type,
+    status_message, friend_created_at (epoch ms).
+    Use a contact's mid as sender_id in search_messages or get_messages.
+    """
+    return [asdict(c) for c in list_contacts(query=query or None, limit=_limit(limit, default=50, maximum=500))]
+
+
+@server.tool(name="get_chat_stats")
+@_serialized_line_call
+def get_chat_stats_tool(chat_id: str, days: int = 7) -> dict[str, Any]:
+    """Per-chat activity stats for the last N days.
+
+    Returns: total/inbound/outgoing/media message counts, unique_senders,
+    busiest_hour (Bangkok local, 0-23), and a daily breakdown list.
+    days: 1-365 (default 7).
+    """
+    from dataclasses import asdict as _asdict
+    stats = get_chat_stats(chat_id=chat_id, days=days)
+    result = _asdict(stats)
+    result["daily"] = [_asdict(d) for d in stats.daily]
+    return result
 
 
 class _BearerAuthMiddleware:
