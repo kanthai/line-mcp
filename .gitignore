@@ -14,9 +14,6 @@ frida/
 auth.json
 .env
 
-# SQLite databases — contain user message data
-*.db
-
 # Personal research scripts with key material
 tools/e2ee_decrypt.py
 tools/frida_find_x25519.py

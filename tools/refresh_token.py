@@ -18,6 +18,7 @@ Optional env:
     LINE_TOKEN_REFRESH_CHAT_ID          force a specific chat id
     LINE_TOKEN_REFRESH_MAX_CANDIDATES   max automatic chats to try, default 5
     LINE_TOKEN_REFRESH_WAIT_SECONDS     wait per launched chat, default 15
+    LINE_TOKEN_REFRESH_DB_MODE          override LINE_MCP_DB_MODE for this script only (e.g. direct, postgres)
 """
 from __future__ import annotations
 import os
@@ -27,6 +28,11 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+
+# Apply per-script DB mode override before line_db is imported
+_db_mode_override = os.environ.get("LINE_TOKEN_REFRESH_DB_MODE")
+if _db_mode_override:
+    os.environ["LINE_MCP_DB_MODE"] = _db_mode_override
 
 SETTING_KEY = "OBS_ENCRYPTED_ACCESS_TOKEN"
 DEFAULT_WAIT_SECONDS = 15.0
@@ -66,9 +72,12 @@ def _extract_token(raw: str) -> str:
     return token
 
 
-def _run_waydroid(args: list[str], timeout: int = 20) -> str:
+_ADB_DEVICE = os.environ.get("LINE_ADB_DEVICE", "127.0.0.1:5555")
+
+
+def _run_adb(args: list[str], timeout: int = 20) -> str:
     return subprocess.run(
-        ["sudo", "waydroid", "shell", "--", *args],
+        ["adb", "-s", _ADB_DEVICE, "shell", *args],
         check=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -78,7 +87,7 @@ def _run_waydroid(args: list[str], timeout: int = 20) -> str:
 
 
 def list_direct_share_chat_ids() -> list[tuple[str, str]]:
-    out = _run_waydroid(["cmd", "shortcut", "get-shortcuts", "jp.naver.line.android"])
+    out = _run_adb(["su", "root", "cmd", "shortcut", "get-shortcuts", "jp.naver.line.android"])
     shortcuts: list[tuple[str, str]] = []
     current_label = ""
     for line in out.splitlines():
@@ -122,31 +131,33 @@ def list_private_unread_image_chat_ids(limit: int | None = None) -> list[tuple[s
     import line_db
 
     rows = line_db._q(f"""
-        SELECT
-          c.chat_id AS chat_id,
-          COALESCE(con.overridden_name, con.profile_name, c.chat_name, c.chat_id) AS name,
-          SUM(CASE WHEN COALESCE(h.attachement_image, 0) != 0 THEN 1 ELSE 0 END) AS image_count,
-          SUM(
-            CASE
-              WHEN COALESCE(h.attachement_image, 0) != 0
-               AND CAST(h.created_time AS INTEGER) > COALESCE(CAST(c.read_up AS INTEGER), 0)
-              THEN 1 ELSE 0
-            END
-          ) AS unread_images,
-          MAX(
-            CASE
-              WHEN COALESCE(h.attachement_image, 0) != 0
-              THEN CAST(h.created_time AS INTEGER) ELSE 0
-            END
-          ) AS latest_img_at
-        FROM chat c
-        JOIN cdb.contacts con ON con.mid = c.chat_id
-        LEFT JOIN chat_history h ON h.chat_id = c.chat_id
-        WHERE c.type = 1
-          AND con.contact_type = 1
-          AND COALESCE(con.bot_category, '') = ''
-        GROUP BY c.chat_id
-        HAVING unread_images > 0
+        SELECT chat_id, name, image_count, unread_images, latest_img_at FROM (
+          SELECT
+            c.chat_id AS chat_id,
+            COALESCE(con.overridden_name, con.profile_name, c.chat_name, c.chat_id) AS name,
+            SUM(CASE WHEN COALESCE(h.attachement_image, 0) != 0 THEN 1 ELSE 0 END) AS image_count,
+            SUM(
+              CASE
+                WHEN COALESCE(h.attachement_image, 0) != 0
+                 AND CAST(h.created_time AS INTEGER) > COALESCE(CAST(c.read_up AS INTEGER), 0)
+                THEN 1 ELSE 0
+              END
+            ) AS unread_images,
+            MAX(
+              CASE
+                WHEN COALESCE(h.attachement_image, 0) != 0
+                THEN CAST(h.created_time AS INTEGER) ELSE 0
+              END
+            ) AS latest_img_at
+          FROM chat c
+          JOIN cdb.contacts con ON con.mid = c.chat_id
+          LEFT JOIN chat_history h ON h.chat_id = c.chat_id
+          WHERE c.type = 1
+            AND con.contact_type = 1
+            AND con.bot_category IS NULL
+          GROUP BY c.chat_id, c.chat_name, con.overridden_name, con.profile_name
+        ) sub
+        WHERE unread_images > 0
         ORDER BY unread_images DESC, latest_img_at DESC
         LIMIT {limit}
     """, attach_contact=True)
@@ -163,8 +174,9 @@ def list_private_unread_image_chat_ids(limit: int | None = None) -> list[tuple[s
 
 
 def trigger_token_regeneration(chat_id: str, wait_seconds: float) -> None:
-    _run_waydroid([
-        "am", "start",
+    # Must run as root to launch unexported DirectShareToChatActivity
+    _run_adb([
+        "su", "root", "am", "start",
         "-a", "android.intent.action.VIEW",
         "-f", "0x8000",
         "-n", "jp.naver.line.android/.service.share.DirectShareToChatActivity",

@@ -1,9 +1,0 @@
-[Unit]
-Description=Periodically foreground LINE to encourage sync
-
-[Timer]
-OnBootSec=6min
-OnUnitActiveSec=10min
-
-[Install]
-WantedBy=timers.target

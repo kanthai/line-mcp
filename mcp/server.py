@@ -20,6 +20,11 @@ from typing import Any
 import uvicorn
 from starlette.requests import Request
 from starlette.responses import JSONResponse
+from contextlib import asynccontextmanager
+from starlette.applications import Starlette
+from starlette.responses import PlainTextResponse
+from starlette.routing import Mount, Route, Router
+from starlette.staticfiles import StaticFiles
 from mcp.server import FastMCP
 
 
@@ -266,7 +271,15 @@ def download_media_tool(
     destination_dir: str = "~/Downloads/line-media",
     prefer_preview: bool = False,
 ) -> dict[str, Any]:
-    """Download one media attachment to disk by message_id."""
+    """Download one media attachment to disk by message_id.
+
+    The response includes inline content so remote agents can use the file without filesystem access:
+    - Images (JPEG/PNG/GIF/WebP): response contains "data" (base64-encoded bytes) and "mime_type".
+      Pass data + mime_type directly to a vision tool.
+    - PDF: response contains "text_content" with extracted text.
+    - DOCX: response contains "text_content" with extracted paragraph text.
+    - Video/audio/other: response contains "path" only.
+    """
     return download_media(
         message_id=message_id,
         destination_dir=destination_dir,
@@ -280,21 +293,25 @@ def pull_message_image_tool(
     message_id: int,
     destination_dir: str = "~/Downloads/line-media",
     prefer_preview: bool = False,
-    wait_seconds: int = 8,
-    min_bytes: int = 50_000,
 ) -> dict[str, Any]:
     """
-    Save one LINE image message for agent use.
+    Save one LINE image message for agent use. Always fast (< 5 s). Never opens LINE UI.
 
-    Direct URL images are downloaded. E2EE/cache-only images open the owning
-    chat in LINE and export newly rendered cache files.
+    Direct URL images are downloaded via CDN. E2EE images are decrypted headlessly via CDN+AES-CTR.
+
+    On success:
+      {"message_id", "chat_id", "mode", "downloaded_files": [...], "count": 1}
+      Each file dict has "data" (base64), "url", "mime_type" — pass to a vision tool directly.
+
+    On CDN failure (e.g. expired token, no URL):
+      {"status": "cdn_failed", "message_id", "chat_id", "error": "...",
+       "hint": "call open_chat_and_cache(chat_id=...) to fetch via LINE UI"}
+      → In that case, call open_chat_and_cache() explicitly. Do NOT retry this tool.
     """
     return pull_message_image(
         message_id=message_id,
         destination_dir=destination_dir,
         prefer_preview=prefer_preview,
-        wait_seconds=wait_seconds,
-        min_bytes=min_bytes,
     )
 
 
@@ -311,8 +328,13 @@ def pull_chat_images_tool(
     """
     Save recent LINE images from one chat for agent use.
 
-    Direct URL images are downloaded. If any image needs LINE's rendered cache,
-    the chat is opened once and newly cached files are exported.
+    Direct URL images are downloaded individually. E2EE images are decrypted headlessly.
+    If any image needs LINE's rendered cache, the chat is opened once and newly cached files are exported.
+
+    Each file dict in "downloaded_files" and "cache_files" contains:
+    - "data": base64-encoded image bytes — pass with "mime_type" directly to a vision tool.
+    - "mime_type": e.g. "image/jpeg"
+    No filesystem access needed by the calling agent.
     """
     return pull_chat_images(
         chat_id=chat_id,
@@ -448,11 +470,46 @@ class _BearerAuthMiddleware:
         await self.app(scope, receive, send)
 
 
+MEDIA_DIR = Path.home() / "Downloads" / "line-media"
+MEDIA_BASE_URL = os.environ.get("LINE_MCP_MEDIA_URL", "http://11.0.0.13:8765/files")
+
+
 def main() -> None:
     api_key = os.environ.get("LINE_MCP_API_KEY", "")
     if not api_key:
         raise RuntimeError("LINE_MCP_API_KEY environment variable is not set")
-    app = _BearerAuthMiddleware(server.streamable_http_app(), api_key=api_key)
+
+    MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Expose base URL to line_db enrichment helper
+    import line_db as _line_db
+    _line_db.MEDIA_SERVE_BASE_URL = MEDIA_BASE_URL
+    _line_db.MEDIA_SERVE_API_KEY = api_key
+
+    mcp_inner = server.streamable_http_app()  # Starlette app with session_manager lifespan
+    mcp_app = _BearerAuthMiddleware(mcp_inner, api_key=api_key)
+    static_app = _BearerAuthMiddleware(
+        StaticFiles(directory=str(MEDIA_DIR), check_dir=False),
+        api_key=api_key,
+    )
+
+    @asynccontextmanager
+    async def lifespan(app: Starlette):
+        # Propagate the MCP app's lifespan so the StreamableHTTP task group initialises.
+        async with mcp_inner.router.lifespan_context(app):
+            yield
+
+    async def health(request):
+        return PlainTextResponse("ok")
+
+    app = Starlette(
+        lifespan=lifespan,
+        routes=[
+            Route("/health", endpoint=health),
+            Mount("/files", app=static_app),
+            Mount("/", app=mcp_app),
+        ],
+    )
     uvicorn.run(app, host="0.0.0.0", port=8765)
 
 

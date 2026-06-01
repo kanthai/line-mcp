@@ -1,9 +1,0 @@
-[Unit]
-Description=LINE Triage Digest — run at 21:00 Bangkok time (UTC+7 = 14:00 UTC)
-
-[Timer]
-OnCalendar=*-*-* 14:00:00
-Persistent=true
-
-[Install]
-WantedBy=timers.target

@@ -1,6 +1,7 @@
 import sqlite3
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -47,3 +48,27 @@ def test_q_auto_falls_back_to_waydroid_when_direct_read_fails(monkeypatch):
         assert line_db._q("SELECT 1 AS ok") == [{"ok": 1}]
 
     waydroid.assert_called_once_with("SELECT 1 AS ok", attach_contact=False)
+
+
+def test_pull_message_image_returns_direct_download_error_when_cache_fallback_is_empty(monkeypatch, tmp_path):
+    media = SimpleNamespace(
+        message_id=1,
+        chat_id="chatA",
+        e2ee=True,
+        download_url="",
+        preview_url="",
+    )
+    monkeypatch.setattr(line_db, "get_media_info", lambda message_id: media)
+    monkeypatch.setattr(line_db, "_is_image_media", lambda media: True)
+    monkeypatch.setattr(line_db, "download_media", lambda **kwargs: (_ for _ in ()).throw(ValueError("cdn failed")))
+    monkeypatch.setattr(line_db, "open_chat_and_cache", lambda **kwargs: {
+        "saved_files": [],
+        "new_cached_files": [],
+        "count": 0,
+    })
+
+    result = line_db.pull_message_image(1, destination_dir=str(tmp_path))
+
+    assert result["downloaded_files"] == []
+    assert result["cache_files"] == []
+    assert result["direct_error"] == "cdn failed"

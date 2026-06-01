@@ -18,6 +18,7 @@ import sqlite3
 import struct
 import subprocess
 import time
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
@@ -29,6 +30,8 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+log = logging.getLogger(__name__)
 
 CONTAINER_DB = "/data/data/jp.naver.line.android/databases/naver_line"
 CONTACT_DB  = "/data/data/jp.naver.line.android/databases/contact"
@@ -123,7 +126,10 @@ def _download_blob(server_id: str, sid: str, oid: str) -> bytes | None:
             if e.code in (401, 403) and attempt == 0:
                 fresh = _refresh_token_from_db()
                 if fresh:
-                    save_auth_token(fresh)
+                    try:
+                        save_auth_token(fresh)
+                    except Exception:
+                        pass
                     token = fresh
                     continue
             return None
@@ -169,6 +175,35 @@ def _connect_readonly(path: Path) -> sqlite3.Connection:
     return conn
 
 
+def _query_via_postgres(sql: str, attach_contact: bool = False) -> list[dict]:
+    dsn = os.environ.get("DATABASE_URL", "").strip()
+    if not dsn:
+        raise RuntimeError("DATABASE_URL is required for LINE_MCP_DB_MODE=postgres")
+    import psycopg
+    from psycopg.rows import dict_row
+    conn = psycopg.connect(dsn, row_factory=dict_row)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SET search_path TO line_raw, public")
+            zero = chr(39) + "0" + chr(39)
+            sql = re.sub(r"COALESCE\(([^,()]+(?:\([^)]*\))?[^,]*),\s*0\)", lambda m: f"COALESCE({m.group(1)}, {zero})", sql)
+            sql = sql.replace("AS INTEGER", "AS BIGINT")
+            cur.execute(sql)
+            if not cur.description:
+                return []
+            out = []
+            for row in cur.fetchall():
+                item = {}
+                for key, value in dict(row).items():
+                    if isinstance(value, (bytes, bytearray, memoryview)):
+                        value = bytes(value).decode("utf-8", errors="replace")
+                    item[key] = value
+                out.append(item)
+            return out
+    finally:
+        conn.close()
+
+
 def _query_via_direct_db(sql: str, attach_contact: bool = False) -> list[dict]:
     if not HOST_DB.exists():
         raise FileNotFoundError(HOST_DB)
@@ -190,8 +225,15 @@ def _q(sql: str, attach_contact: bool = False) -> list[dict]:
         return _query_via_waydroid(sql, attach_contact=attach_contact)
     if mode == "direct":
         return _query_via_direct_db(sql, attach_contact=attach_contact)
+    if mode == "postgres":
+        return _query_via_postgres(sql, attach_contact=attach_contact)
     if mode != "auto":
         raise ValueError(f"unsupported LINE_MCP_DB_MODE: {mode}")
+    if os.environ.get("DATABASE_URL"):
+        try:
+            return _query_via_postgres(sql, attach_contact=attach_contact)
+        except Exception:
+            log.exception("Postgres LINE read failed; falling back to direct SQLite")
     try:
         return _query_via_direct_db(sql, attach_contact=attach_contact)
     except Exception:
@@ -203,11 +245,16 @@ def _s(val: str) -> str:
 
 
 def _unread_count_sql(alias: str = "c") -> str:
-    typed = f"CAST(COALESCE(NULLIF({alias}.unread_type_and_count, ''), '0') AS INTEGER)"
-    delta = (
-        f"MAX(CAST(COALESCE({alias}.message_count, 0) AS INTEGER) - "
-        f"CAST(COALESCE({alias}.read_message_count, 0) AS INTEGER), 0)"
+    quote = chr(39)
+    typed = f"CAST(COALESCE(NULLIF({alias}.unread_type_and_count, {quote}{quote}), {quote}0{quote}) AS INTEGER)"
+    delta_expr = (
+        f"CAST(COALESCE({alias}.message_count, 0) AS INTEGER) - "
+        f"CAST(COALESCE({alias}.read_message_count, 0) AS INTEGER)"
     )
+    if os.environ.get("LINE_MCP_DB_MODE", "auto").strip().lower() == "postgres":
+        delta = f"GREATEST({delta_expr}, 0)"
+        return f"GREATEST({typed}, {delta})"
+    delta = f"MAX({delta_expr}, 0)"
     return f"MAX({typed}, {delta})"
 
 
@@ -432,13 +479,13 @@ def _save_cache_files(
         dest_path = dest_dir / filename
         with open(dest_path, "wb") as f:
             f.write(data)
-        saved.append({
+        saved.append(_enrich_file({
             "container_file": container_path,
             "path": str(dest_path),
             "bytes": dest_path.stat().st_size,
             "mtime": int(item["mtime"]),
             "mime_type": mimetypes.guess_type(dest_path.name)[0] or "application/octet-stream",
-        })
+        }))
     return saved
 
 
@@ -849,16 +896,33 @@ def summarize_recent_activity(
             SELECT DISTINCT chat_id
             FROM recent
         ),
-        latest AS (
-            SELECT r.*
+        recent_stats AS (
+            SELECT
+                r.chat_id,
+                COUNT(*) AS message_count,
+                SUM(CASE WHEN COALESCE(r.from_mid, '') != '' THEN 1 ELSE 0 END) AS inbound_count,
+                SUM(CASE WHEN COALESCE(r.from_mid, '') = '' THEN 1 ELSE 0 END) AS outgoing_count,
+                SUM(CASE WHEN COALESCE(r.attachement_type, 0) != 0
+                           OR COALESCE(r.attachement_local_uri, '') != ''
+                           OR COALESCE(r.attachement_image, 0) != 0 THEN 1 ELSE 0 END) AS media_count,
+                MIN(CAST(COALESCE(r.created_time, 0) AS INTEGER)) AS first_message_at,
+                MAX(CAST(COALESCE(r.created_time, 0) AS INTEGER)) AS last_message_at
             FROM recent r
-            JOIN (
-                SELECT chat_id, MAX(CAST(COALESCE(created_time, 0) AS INTEGER)) AS latest_at
-                FROM recent
-                GROUP BY chat_id
-            ) lm ON lm.chat_id = r.chat_id
-                AND CAST(COALESCE(r.created_time, 0) AS INTEGER) = lm.latest_at
             GROUP BY r.chat_id
+        ),
+        latest AS (
+            SELECT *
+            FROM (
+                SELECT
+                    r.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY r.chat_id
+                        ORDER BY CAST(COALESCE(r.created_time, 0) AS INTEGER) DESC,
+                                 CAST(COALESCE(r.id, 0) AS INTEGER) DESC
+                    ) AS rn
+                FROM recent r
+            ) ranked
+            WHERE rn = 1
         ),
         latest_inbound AS (
             SELECT
@@ -879,17 +943,15 @@ def summarize_recent_activity(
             GROUP BY h.chat_id
         )
         SELECT
-            r.chat_id,
+            s.chat_id,
             COALESCE(g.name, con.overridden_name, con.profile_name, c.chat_name, '') AS chat_name,
             {unread_count} AS unread_count,
-            COUNT(*) AS message_count,
-            SUM(CASE WHEN COALESCE(r.from_mid, '') != '' THEN 1 ELSE 0 END) AS inbound_count,
-            SUM(CASE WHEN COALESCE(r.from_mid, '') = '' THEN 1 ELSE 0 END) AS outgoing_count,
-            SUM(CASE WHEN COALESCE(r.attachement_type, 0) != 0
-                       OR COALESCE(r.attachement_local_uri, '') != ''
-                       OR COALESCE(r.attachement_image, 0) != 0 THEN 1 ELSE 0 END) AS media_count,
-            MIN(CAST(COALESCE(r.created_time, 0) AS INTEGER)) AS first_message_at,
-            MAX(CAST(COALESCE(r.created_time, 0) AS INTEGER)) AS last_message_at,
+            s.message_count,
+            s.inbound_count,
+            s.outgoing_count,
+            s.media_count,
+            s.first_message_at,
+            s.last_message_at,
             CAST(COALESCE(li.last_inbound_at, 0) AS INTEGER) AS last_inbound_at,
             CAST(COALESCE(lo.last_outgoing_at, 0) AS INTEGER) AS last_outgoing_at,
             l.id AS latest_message_id,
@@ -902,15 +964,14 @@ def summarize_recent_activity(
                 THEN 1 ELSE 0
             END AS needs_reply,
             COALESCE(CAST(l.server_id AS TEXT), CAST(l.id AS TEXT)) AS latest_message_server_id
-        FROM recent r
-        JOIN latest l             ON l.chat_id = r.chat_id
-        LEFT JOIN latest_inbound li ON li.chat_id = r.chat_id
-        LEFT JOIN latest_outgoing lo ON lo.chat_id = r.chat_id
-        LEFT JOIN chat c          ON c.chat_id = r.chat_id
-        LEFT JOIN groups g        ON g.id = r.chat_id
-        LEFT JOIN cdb.contacts con ON con.mid = r.chat_id
+        FROM recent_stats s
+        JOIN latest l             ON l.chat_id = s.chat_id
+        LEFT JOIN latest_inbound li ON li.chat_id = s.chat_id
+        LEFT JOIN latest_outgoing lo ON lo.chat_id = s.chat_id
+        LEFT JOIN chat c          ON c.chat_id = s.chat_id
+        LEFT JOIN groups g        ON g.id = s.chat_id
+        LEFT JOIN cdb.contacts con ON con.mid = s.chat_id
         LEFT JOIN cdb.contacts scon ON scon.mid = l.from_mid
-        GROUP BY r.chat_id
         ORDER BY last_message_at DESC
         LIMIT {chat_limit}
     """, attach_contact=True)
@@ -1054,7 +1115,7 @@ def download_media(
         ext = _media_ext_from_bytes(plaintext, ".jpg")
         dest_path = dest_dir / f"{_safe_name(media.chat_id)}-{message_id}{ext}"
         dest_path.write_bytes(plaintext)
-        return {
+        return _enrich_file({
             "message_id": media.message_id,
             "chat_id": media.chat_id,
             "downloaded": True,
@@ -1062,7 +1123,7 @@ def download_media(
             "path": str(dest_path),
             "bytes": len(plaintext),
             "mime_type": mimetypes.guess_type(dest_path.name)[0] or "image/jpeg",
-        }
+        })
 
     if not media.download_url and not media.preview_url:
         raise ValueError(f"message_id {message_id} has no downloadable media URL")
@@ -1087,7 +1148,7 @@ def download_media(
             dest_path.rename(renamed)
             dest_path = renamed
 
-    return {
+    return _enrich_file({
         "message_id": media.message_id,
         "chat_id": media.chat_id,
         "downloaded": True,
@@ -1098,11 +1159,73 @@ def download_media(
         "media_type": media.media_type,
         "bytes": dest_path.stat().st_size,
         "mime_type": mimetypes.guess_type(dest_path.name)[0] or "application/octet-stream",
-    }
+    })
 
 
 def _is_image_media(media: Media) -> bool:
     return bool(media.image_flag) or media.media_type == 1
+
+
+_IMAGE_MIMES = {"image/jpeg", "image/png", "image/gif", "image/webp", "image/bmp"}
+_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
+
+
+# Set by server.py at startup so enriched responses include fetchable URLs
+MEDIA_SERVE_BASE_URL: str = ""
+MEDIA_SERVE_API_KEY: str = ""
+
+# Images larger than this are served via URL only (base64 would exceed MCP transport limits)
+_INLINE_SIZE_LIMIT = 300_000  # 300 KB
+
+
+def _enrich_file(result: dict) -> dict:
+    """Add inline content to a file result dict so remote agents can use it without filesystem access.
+
+    Images   → "url" always (fetchable HTTP URL); "data" (base64) only if file < 300 KB
+    PDF      → "text_content" extracted via pymupdf
+    DOCX     → "text_content" extracted via python-docx
+    Other    → unchanged
+    """
+    path = result.get("path", "")
+    if not path:
+        return result
+    p = Path(path)
+    if not p.exists():
+        return result
+    mime = result.get("mime_type") or mimetypes.guess_type(path)[0] or ""
+    ext = p.suffix.lower()
+
+    if mime in _IMAGE_MIMES or ext in _IMAGE_EXTS:
+        if not result.get("mime_type"):
+            result["mime_type"] = mime or "image/jpeg"
+        if MEDIA_SERVE_BASE_URL:
+            key_suffix = f"?key={MEDIA_SERVE_API_KEY}" if MEDIA_SERVE_API_KEY else ""
+            result["url"] = f"{MEDIA_SERVE_BASE_URL}/{p.name}{key_suffix}"
+        file_bytes = p.stat().st_size
+        if file_bytes <= _INLINE_SIZE_LIMIT:
+            result["data"] = base64.b64encode(p.read_bytes()).decode()
+        return result
+
+    if mime == "application/pdf" or ext == ".pdf":
+        try:
+            import fitz
+            doc = fitz.open(str(p))
+            result["text_content"] = "\n".join(page.get_text() for page in doc)
+            doc.close()
+        except Exception as e:
+            result["text_content_error"] = str(e)
+        return result
+
+    if mime in ("application/vnd.openxmlformats-officedocument.wordprocessingml.document",) or ext == ".docx":
+        try:
+            from docx import Document
+            doc = Document(str(p))
+            result["text_content"] = "\n".join(p.text for p in doc.paragraphs if p.text)
+        except Exception as e:
+            result["text_content_error"] = str(e)
+        return result
+
+    return result
 
 
 def extract_cached_media(
@@ -1135,54 +1258,60 @@ def pull_message_image(
     message_id: int,
     destination_dir: str = "~/Downloads/line-media",
     prefer_preview: bool = False,
-    wait_seconds: int = 8,
-    min_bytes: int = 50_000,
 ) -> dict[str, object]:
     """
     Save an image for one LINE media message for agent consumption.
 
-    Non-E2EE images are downloaded by their stored URL. E2EE/cache-only images
-    use LINE's own UI render path: open the chat, wait, then export newly
-    written cache files.
+    Non-E2EE images are downloaded from their stored URL.
+    E2EE images are decrypted headlessly via CDN+AES-CTR.
+
+    On success returns:
+      {"message_id", "chat_id", "mode", "downloaded_files": [...], "count": 1}
+      Each file dict has "data" (base64), "url", "mime_type" for direct vision use.
+
+    On CDN failure returns:
+      {"status": "cdn_failed", "message_id", "chat_id", "error": "...",
+       "hint": "call open_chat_and_cache(chat_id=...) to fetch via LINE UI"}
+
+    This tool is always fast (< 5 s). It never opens LINE's UI.
+    If CDN fails, call open_chat_and_cache() explicitly to trigger the slow UI path.
     """
     media = get_media_info(message_id)
     if not _is_image_media(media):
         raise ValueError(f"message_id {message_id} is not an image media message")
 
-    # Try direct download (handles both plain and E2EE via CDN+decrypt)
-    if media.e2ee or (media.download_url or media.preview_url):
-        try:
-            downloaded = download_media(
-                message_id=message_id,
-                destination_dir=destination_dir,
-                prefer_preview=prefer_preview,
-            )
-            return {
-                "message_id": message_id,
-                "chat_id": media.chat_id,
-                "mode": "decrypt" if media.e2ee else "download",
-                "downloaded_files": [downloaded],
-                "cache_files": [],
-                "count": 1,
-            }
-        except Exception:
-            pass  # fall through to UI cache path
+    if not media.e2ee and not media.download_url and not media.preview_url:
+        return {
+            "status": "cdn_failed",
+            "message_id": message_id,
+            "chat_id": media.chat_id,
+            "error": "no download_url or preview_url stored for this message",
+            "hint": f"call open_chat_and_cache(chat_id={media.chat_id!r}) to fetch via LINE UI",
+        }
 
-    cached = open_chat_and_cache(
-        chat_id=media.chat_id,
-        wait_seconds=wait_seconds,
-        destination_dir=destination_dir,
-        min_bytes=min_bytes,
-    )
-    return {
-        "message_id": message_id,
-        "chat_id": media.chat_id,
-        "mode": "cache",
-        "downloaded_files": [],
-        "cache_files": cached["saved_files"],
-        "new_cached_files": cached["new_cached_files"],
-        "count": cached["count"],
-    }
+    try:
+        downloaded = download_media(
+            message_id=message_id,
+            destination_dir=destination_dir,
+            prefer_preview=prefer_preview,
+        )
+        return {
+            "message_id": message_id,
+            "chat_id": media.chat_id,
+            "mode": "decrypt" if media.e2ee else "download",
+            "downloaded_files": [downloaded],
+            "cache_files": [],
+            "count": 1,
+        }
+    except Exception as e:
+        log.warning("Direct media download failed for message_id %s: %s", message_id, e)
+        return {
+            "status": "cdn_failed",
+            "message_id": message_id,
+            "chat_id": media.chat_id,
+            "error": str(e),
+            "hint": f"call open_chat_and_cache(chat_id={media.chat_id!r}) to fetch via LINE UI",
+        }
 
 
 def pull_chat_images(
@@ -1323,7 +1452,7 @@ def open_chat_and_cache(
     # Open chat
     subprocess.run(
         ["sudo", "waydroid", "shell", "--",
-         "am", "start", "-n", "jp.naver.line.android/.activity.ChatActivity",
+         "am", "start", "-n", "jp.naver.line.android/.activity.chathistory.ChatHistoryActivityLaunchActivity",
          "--es", "chatId", chat_id],
         capture_output=True,
     )
