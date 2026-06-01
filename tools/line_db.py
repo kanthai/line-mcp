@@ -1,10 +1,16 @@
 """
-LINE SQLite read path.
+LINE data read path.
 
-All queries run inside the Waydroid container via:
-  sudo waydroid shell -- sqlite3 <db> -json "<sql>"
+Primary read path (deployed): LINE_MCP_DB_MODE=postgres — queries the
+line_raw/cdb schemas on PostgreSQL (CT101:5432), populated every 5 s by
+line-sync-postgres. Fallback paths: direct SQLite read from host filesystem,
+or waydroid shell sqlite3 for legacy setups.
 
-Confirmed column names from setup/04-db-schema.sh on 2026-04-24:
+Note: media auth/decryption (download_media, pull_message_image, etc.) still
+reads OBS_ENCRYPTED_ACCESS_TOKEN from the live Redroid SQLite DB — intentional,
+must be live.
+
+Confirmed column names (setup/04-db-schema.sh, 2026-04-24):
   chat:         chat_id, chat_name, last_message, last_created_time, unread_type_and_count
   chat_history: id, type, chat_id, from_mid, content, created_time
 """
@@ -175,33 +181,64 @@ def _connect_readonly(path: Path) -> sqlite3.Connection:
     return conn
 
 
+_pg_conn_dsn: str = ""
+_pg_conn_obj = None  # cached psycopg connection
+
+
+def _get_pg_conn(dsn: str):
+    """Return a cached long-lived psycopg connection; reconnect if closed or DSN changed."""
+    global _pg_conn_dsn, _pg_conn_obj
+    import psycopg
+    from psycopg.rows import dict_row
+    if _pg_conn_obj is not None and not _pg_conn_obj.closed and _pg_conn_dsn == dsn:
+        return _pg_conn_obj
+    if _pg_conn_obj is not None:
+        try:
+            _pg_conn_obj.close()
+        except Exception:
+            pass
+    _pg_conn_obj = psycopg.connect(
+        dsn, row_factory=dict_row, autocommit=True,
+        options="-c client_encoding=UTF8 -c search_path=line_raw,cdb,public",
+    )
+    _pg_conn_dsn = dsn
+    return _pg_conn_obj
+
+
 def _query_via_postgres(sql: str, attach_contact: bool = False) -> list[dict]:
     dsn = os.environ.get("DATABASE_URL", "").strip()
     if not dsn:
         raise RuntimeError("DATABASE_URL is required for LINE_MCP_DB_MODE=postgres")
-    import psycopg
-    from psycopg.rows import dict_row
-    conn = psycopg.connect(dsn, row_factory=dict_row)
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SET search_path TO line_raw, public")
-            zero = chr(39) + "0" + chr(39)
-            sql = re.sub(r"COALESCE\(([^,()]+(?:\([^)]*\))?[^,]*),\s*0\)", lambda m: f"COALESCE({m.group(1)}, {zero})", sql)
-            sql = sql.replace("AS INTEGER", "AS BIGINT")
-            cur.execute(sql)
-            if not cur.description:
-                return []
-            out = []
-            for row in cur.fetchall():
-                item = {}
-                for key, value in dict(row).items():
-                    if isinstance(value, (bytes, bytearray, memoryview)):
-                        value = bytes(value).decode("utf-8", errors="replace")
-                    item[key] = value
-                out.append(item)
-            return out
-    finally:
-        conn.close()
+    # SQLite→Postgres dialect fixes:
+    #   COALESCE(text_col, 0) → COALESCE(text_col, '0')  (text vs int type mismatch)
+    #   AS INTEGER → AS BIGINT  (epoch-ms timestamps exceed 32-bit)
+    #   LIKE → ILIKE  (Postgres LIKE is case-sensitive unlike SQLite)
+    zero = chr(39) + "0" + chr(39)
+    sql = re.sub(r"COALESCE\(([^,()]+(?:\([^)]*\))?[^,]*),\s*0\)", lambda m: f"COALESCE({m.group(1)}, {zero})", sql)
+    sql = sql.replace("AS INTEGER", "AS BIGINT")
+    sql = sql.replace(" LIKE ", " ILIKE ")
+    for attempt in range(2):
+        try:
+            conn = _get_pg_conn(dsn)
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                if not cur.description:
+                    return []
+                out = []
+                for row in cur.fetchall():
+                    item = {}
+                    for key, value in dict(row).items():
+                        if isinstance(value, (bytes, bytearray, memoryview)):
+                            value = bytes(value).decode("utf-8", errors="replace")
+                        item[key] = value
+                    out.append(item)
+                return out
+        except Exception:
+            if attempt == 0:
+                global _pg_conn_obj  # noqa: PLW0603
+                _pg_conn_obj = None
+                continue
+            raise
 
 
 def _query_via_direct_db(sql: str, attach_contact: bool = False) -> list[dict]:
@@ -527,7 +564,7 @@ def _media_rows(where_sql: str, limit: int) -> list[dict]:
             OR COALESCE(h.attachement_image, 0) != 0
         )
         {where_sql}
-        ORDER BY h.created_time DESC
+        ORDER BY CAST(COALESCE(h.created_time, 0) AS INTEGER) DESC
         LIMIT {int(limit)}
     """, attach_contact=True)
 
@@ -563,7 +600,7 @@ def list_chats(limit: int = 50) -> list[Chat]:
         FROM chat c
         LEFT JOIN groups g        ON g.id    = c.chat_id
         LEFT JOIN cdb.contacts con ON con.mid = c.chat_id
-        ORDER BY c.last_created_time DESC
+        ORDER BY CAST(COALESCE(c.last_created_time, 0) AS INTEGER) DESC
         LIMIT {int(limit)}
     """, attach_contact=True)
     return [Chat(**r) for r in rows]
@@ -582,7 +619,7 @@ def list_unread_chats(limit: int = 50) -> list[Chat]:
         LEFT JOIN groups g         ON g.id = c.chat_id
         LEFT JOIN cdb.contacts con ON con.mid = c.chat_id
         WHERE {unread_count} > 0
-        ORDER BY c.last_created_time DESC
+        ORDER BY CAST(COALESCE(c.last_created_time, 0) AS INTEGER) DESC
         LIMIT {int(limit)}
     """, attach_contact=True)
     return [Chat(**r) for r in rows]
@@ -620,7 +657,7 @@ def get_messages(chat_id: str, limit: int = 50) -> list[Message]:
         FROM chat_history h
         LEFT JOIN cdb.contacts scon ON scon.mid = h.from_mid
         WHERE h.chat_id = '{_s(chat_id)}'
-        ORDER BY h.created_time DESC
+        ORDER BY CAST(COALESCE(h.created_time, 0) AS INTEGER) DESC
         LIMIT {int(limit)}
     """, attach_contact=True)
     return [Message(**r) for r in rows]
@@ -645,7 +682,7 @@ def list_latest_inbound_messages(limit: int = 10) -> list[InboundMessage]:
         LEFT JOIN cdb.contacts con ON con.mid = h.chat_id
         LEFT JOIN cdb.contacts scon ON scon.mid = h.from_mid
         WHERE COALESCE(h.from_mid, '') != ''
-        ORDER BY h.created_time DESC
+        ORDER BY CAST(COALESCE(h.created_time, 0) AS INTEGER) DESC
         LIMIT {int(limit)}
     """, attach_contact=True)
     return [InboundMessage(**r) for r in rows]
@@ -702,7 +739,7 @@ def list_reply_candidates(limit: int = 25) -> list[ReplyCandidate]:
         LEFT JOIN cdb.contacts con   ON con.mid = li.chat_id
         LEFT JOIN cdb.contacts scon  ON scon.mid = li.from_mid
         WHERE CAST(COALESCE(li.created_time, 0) AS INTEGER) > CAST(COALESCE(lo.latest_outgoing_at, 0) AS INTEGER)
-        ORDER BY li.created_time DESC
+        ORDER BY CAST(COALESCE(li.created_time, 0) AS INTEGER) DESC
         LIMIT {int(limit)}
     """, attach_contact=True)
     return [ReplyCandidate(**r) for r in rows]
@@ -741,7 +778,7 @@ def get_message_context(message_id: int, before: int = 10, after: int = 5) -> di
         LEFT JOIN cdb.contacts scon ON scon.mid = h.from_mid
         WHERE h.chat_id = '{_s(chat_id)}'
           AND CAST(COALESCE(h.created_time, 0) AS INTEGER) < {created_at}
-        ORDER BY h.created_time DESC
+        ORDER BY CAST(COALESCE(h.created_time, 0) AS INTEGER) DESC
         LIMIT {before_limit}
     """, attach_contact=True)
     target_message = _q(f"""
@@ -773,7 +810,7 @@ def get_message_context(message_id: int, before: int = 10, after: int = 5) -> di
         LEFT JOIN cdb.contacts scon ON scon.mid = h.from_mid
         WHERE h.chat_id = '{_s(chat_id)}'
           AND CAST(COALESCE(h.created_time, 0) AS INTEGER) > {created_at}
-        ORDER BY h.created_time ASC
+        ORDER BY CAST(COALESCE(h.created_time, 0) AS INTEGER) ASC
         LIMIT {after_limit}
     """, attach_contact=True)
 
@@ -819,7 +856,7 @@ def find_person(query: str, limit: int = 20, message_limit: int = 20) -> dict[st
         LEFT JOIN cdb.contacts con ON con.mid = c.chat_id
         WHERE lower(COALESCE(g.name, '') || ' ' || COALESCE(con.overridden_name, '') || ' ' ||
                     COALESCE(con.profile_name, '') || ' ' || COALESCE(c.chat_name, '')) LIKE '%{q}%'
-        ORDER BY c.last_created_time DESC
+        ORDER BY CAST(COALESCE(c.last_created_time, 0) AS INTEGER) DESC
         LIMIT {int(limit)}
     """, attach_contact=True)
 
@@ -842,7 +879,7 @@ def find_person(query: str, limit: int = 20, message_limit: int = 20) -> dict[st
         WHERE COALESCE(h.from_mid, '') != ''
           AND lower(COALESCE(scon.overridden_name, '') || ' ' ||
                     COALESCE(scon.profile_name, '') || ' ' || COALESCE(h.from_mid, '')) LIKE '%{q}%'
-        ORDER BY h.created_time DESC
+        ORDER BY CAST(COALESCE(h.created_time, 0) AS INTEGER) DESC
         LIMIT {int(message_limit)}
     """, attach_contact=True)
 
@@ -997,25 +1034,39 @@ def summarize_recent_activity(
     ]
 
     messages_by_chat: dict[str, list[Message]] = {}
-    for activity in activities:
-        rows = _q(f"""
-            SELECT
-                h.id                                              AS message_id,
-                h.chat_id,
-                COALESCE(h.from_mid, '')                          AS sender_id,
-                COALESCE(scon.overridden_name, scon.profile_name, h.from_mid, '') AS sender_name,
-                COALESCE(h.content, '')                           AS text,
-                CAST(COALESCE(h.created_time, 0) AS INTEGER)      AS created_at,
-                h.type,
-                COALESCE(CAST(h.server_id AS TEXT), CAST(h.id AS TEXT)) AS server_id
-            FROM chat_history h
-            LEFT JOIN cdb.contacts scon ON scon.mid = h.from_mid
-            WHERE h.chat_id = '{_s(activity.chat_id)}'
-              AND CAST(COALESCE(h.created_time, 0) AS INTEGER) >= {since_ms}
-            ORDER BY h.created_time DESC
-            LIMIT {messages_per_chat}
+    if activities:
+        ids_sql = ",".join(f"'{_s(a.chat_id)}'" for a in activities)
+        msg_rows = _q(f"""
+            WITH ranked AS (
+                SELECT
+                    h.id                                              AS message_id,
+                    h.chat_id,
+                    COALESCE(h.from_mid, '')                          AS sender_id,
+                    COALESCE(scon.overridden_name, scon.profile_name, h.from_mid, '') AS sender_name,
+                    COALESCE(h.content, '')                           AS text,
+                    CAST(COALESCE(h.created_time, 0) AS INTEGER)      AS created_at,
+                    h.type,
+                    COALESCE(CAST(h.server_id AS TEXT), CAST(h.id AS TEXT)) AS server_id,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY h.chat_id
+                        ORDER BY CAST(COALESCE(h.created_time, 0) AS INTEGER) DESC,
+                                 CAST(COALESCE(h.id, 0) AS INTEGER) DESC
+                    ) AS rn
+                FROM chat_history h
+                LEFT JOIN cdb.contacts scon ON scon.mid = h.from_mid
+                WHERE h.chat_id IN ({ids_sql})
+                  AND CAST(COALESCE(h.created_time, 0) AS INTEGER) >= {since_ms}
+            )
+            SELECT message_id, chat_id, sender_id, sender_name, text, created_at, type, server_id
+            FROM ranked
+            WHERE rn <= {messages_per_chat}
+            ORDER BY chat_id, created_at ASC
         """, attach_contact=True)
-        messages_by_chat[activity.chat_id] = [Message(**row) for row in reversed(rows)]
+        for row in msg_rows:
+            cid = row["chat_id"]
+            if cid not in messages_by_chat:
+                messages_by_chat[cid] = []
+            messages_by_chat[cid].append(Message(**row))
 
     return {
         "since_ms": since_ms,
@@ -1040,7 +1091,7 @@ def search_messages(query: str, limit: int = 20) -> list[Message]:
         FROM chat_history h
         LEFT JOIN cdb.contacts scon ON scon.mid = h.from_mid
         WHERE h.content LIKE '%{_s(query)}%'
-        ORDER BY h.created_time DESC
+        ORDER BY CAST(COALESCE(h.created_time, 0) AS INTEGER) DESC
         LIMIT {int(limit)}
     """, attach_contact=True)
     return [Message(**r) for r in rows]
