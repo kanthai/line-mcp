@@ -246,14 +246,24 @@ def _s(val: str) -> str:
 
 def _unread_count_sql(alias: str = "c") -> str:
     quote = chr(39)
+    if os.environ.get("LINE_MCP_DB_MODE", "auto").strip().lower() == "postgres":
+        # unread_type_and_count can be "COUPON\t2", "MENTION\t1", "5", or ""
+        # regexp_replace strips everything from the first non-digit onwards, giving "" or a number
+        typed = (
+            f"COALESCE(NULLIF(regexp_replace({alias}.unread_type_and_count,"
+            f" {quote}[^0-9].*${quote}, {quote}{quote}), {quote}{quote})::bigint, 0)"
+        )
+        delta = (
+            f"GREATEST("
+            f"COALESCE({alias}.message_count::bigint, 0) - "
+            f"COALESCE({alias}.read_message_count::bigint, 0), 0)"
+        )
+        return f"GREATEST({typed}, {delta})"
     typed = f"CAST(COALESCE(NULLIF({alias}.unread_type_and_count, {quote}{quote}), {quote}0{quote}) AS INTEGER)"
     delta_expr = (
         f"CAST(COALESCE({alias}.message_count, 0) AS INTEGER) - "
         f"CAST(COALESCE({alias}.read_message_count, 0) AS INTEGER)"
     )
-    if os.environ.get("LINE_MCP_DB_MODE", "auto").strip().lower() == "postgres":
-        delta = f"GREATEST({delta_expr}, 0)"
-        return f"GREATEST({typed}, {delta})"
     delta = f"MAX({delta_expr}, 0)"
     return f"MAX({typed}, {delta})"
 
