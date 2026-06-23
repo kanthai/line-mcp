@@ -44,7 +44,7 @@ from line_db import download_media, extract_cached_media, find_person, get_chat,
 
 server = FastMCP(
     name="line-mcp",
-    instructions="Read-only MCP server for LINE chats stored in a Waydroid container.",
+    instructions="Read-only MCP server for LINE chats stored in a Redroid (Android) container.",
     host="0.0.0.0",
     port=8765,
 )
@@ -395,7 +395,7 @@ def open_chat_and_cache_tool(
 ) -> dict[str, object]:
     """
     Open a LINE chat via am-start deeplink, triggering LINE to decrypt and cache E2EE media.
-    Exports newly cached files larger than min_bytes. Requires LINE UI to be visible (waydroid show-full-ui running).
+    Exports newly cached files larger than min_bytes. Requires the LINE UI to be rendered (Redroid container running).
     Use this when download_media fails with an E2EE error.
     """
     return open_chat_and_cache(
@@ -414,7 +414,7 @@ def extract_cached_media_tool(
     limit: int = 20,
 ) -> dict[str, Any]:
     """
-    Export media files that LINE has already rendered into its normal Waydroid cache.
+    Export media files that LINE has already rendered into its normal Redroid cache.
 
     This does not decrypt, hook, or download media; it copies cache files that
     already exist after LINE has displayed them.
