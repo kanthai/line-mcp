@@ -1,0 +1,371 @@
+#!/usr/bin/env bash
+# Allocate Redroid binder devices and grant the current binder major to an LXC.
+# Installed on the Proxmox HOST as /usr/local/bin/redroid-binder-alloc (see proxmox/README.md).
+set -Eeuo pipefail
+
+CONTAINER=""
+CT_ID=""
+START_CONTAINER=0
+DRY_RUN=0
+WAIT=1
+
+PCT="${PCT:-pct}"
+LXC_CGROUP="${LXC_CGROUP:-lxc-cgroup}"
+BINDER_ALLOC="${BINDER_ALLOC:-/usr/local/bin/binder_alloc}"
+PROC_ROOT="${PROC_ROOT:-/proc}"
+CGROUP_ROOT="${CGROUP_ROOT:-/sys/fs/cgroup}"
+PROC_DEVICES="${PROC_DEVICES:-/proc/devices}"
+WAIT_SECONDS="${WAIT_SECONDS:-90}"
+LXC_CONFIG="${LXC_CONFIG:-}"
+STATE_DIR="${STATE_DIR:-/var/lib/redroid-binder}"
+GRANTED_MAJORS=""
+PERSISTED_MAJORS=""
+
+usage() {
+  cat <<'EOF'
+Usage: redroid-binder-alloc [--start-container] [--dry-run] [--no-wait] [container] [ct_id]
+
+Allocates binder devices inside the Redroid Docker container and grants the
+detected binder character-device major to the LXC cgroup dynamically.
+
+Defaults:
+  container: redroid
+  ct_id:     103
+EOF
+}
+
+die() {
+  echo "ERROR: $*" >&2
+  exit 1
+}
+
+log() {
+  echo "redroid-binder-alloc: $*"
+}
+
+run() {
+  if [ "$DRY_RUN" -eq 1 ]; then
+    printf 'DRY-RUN:'
+    printf ' %q' "$@"
+    printf '\n'
+    return 0
+  fi
+  "$@"
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --start-container)
+      START_CONTAINER=1
+      shift
+      ;;
+    --dry-run)
+      DRY_RUN=1
+      shift
+      ;;
+    --no-wait)
+      WAIT=0
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      die "unknown option: $1"
+      ;;
+    *)
+      if [ -z "$CONTAINER" ]; then
+        CONTAINER="$1"
+      elif [ -z "$CT_ID" ]; then
+        CT_ID="$1"
+      else
+        die "too many positional arguments"
+      fi
+      shift
+      ;;
+  esac
+done
+
+CONTAINER="${CONTAINER:-redroid}"
+CT_ID="${CT_ID:-103}"
+LXC_CONFIG="${LXC_CONFIG:-/etc/pve/lxc/$CT_ID.conf}"
+
+device_exists() {
+  local path="$1"
+  [ -c "$path" ] || { [ "${REDROID_BINDER_TEST_ALLOW_REGULAR:-0}" = "1" ] && [ -e "$path" ]; }
+}
+
+wait_until() {
+  local label="$1"
+  shift
+  local deadline=$((SECONDS + WAIT_SECONDS))
+
+  while ! "$@"; do
+    if [ "$WAIT" -ne 1 ] || [ "$SECONDS" -ge "$deadline" ]; then
+      die "timed out waiting for $label"
+    fi
+    sleep 1
+  done
+}
+
+ct_is_running() {
+  "$PCT" status "$CT_ID" 2>/dev/null | grep -q "status: running"
+}
+
+docker_is_ready() {
+  "$PCT" exec "$CT_ID" -- docker info >/dev/null 2>&1
+}
+
+get_container_id() {
+  "$PCT" exec "$CT_ID" -- docker inspect --format '{{.Id}}' "$CONTAINER" 2>/dev/null | head -1
+}
+
+find_scope() {
+  local base="$CGROUP_ROOT/lxc/$CT_ID"
+  local cid="$1"
+  local short="${cid:0:12}"
+
+  [ -d "$base" ] || return 1
+  find "$base" -type d \( -name "docker-$cid.scope" -o -name "docker-$short*.scope" \) -print -quit 2>/dev/null
+}
+
+read_scope_pid() {
+  local scope="$1"
+  awk 'NF {print; exit}' "$scope/cgroup.procs" 2>/dev/null
+}
+
+path_is_ready() {
+  device_exists "$1"
+}
+
+invoke_binder_alloc() {
+  local bctl="$1"
+  local output rc
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    run "$BINDER_ALLOC" "$bctl"
+    return 0
+  fi
+
+  set +e
+  output=$("$BINDER_ALLOC" "$bctl" 2>&1)
+  rc=$?
+  set -e
+
+  if [ "$rc" -ne 0 ] && ! grep -q "File exists" <<<"$output"; then
+    printf '%s\n' "$output" >&2
+    die "binder allocation failed"
+  fi
+
+  grep -v "File exists" <<<"$output" || true
+}
+
+binder_major() {
+  local device="$1"
+  local major_hex major
+
+  major_hex=$(stat -c '%t' "$device")
+  if ! [[ "$major_hex" =~ ^[[:xdigit:]]+$ ]]; then
+    die "invalid binder major '$major_hex' for $device"
+  fi
+
+  major=$((16#$major_hex))
+  if [ "$major" -le 0 ]; then
+    die "invalid binder major '$major' for $device"
+  fi
+
+  printf '%s\n' "$major"
+}
+
+validate_decimal_major() {
+  local major="$1"
+
+  if ! [[ "$major" =~ ^[0-9]+$ ]] || [ "$major" -le 0 ]; then
+    die "invalid binder major '$major'"
+  fi
+}
+
+kernel_binder_major() {
+  local major
+
+  major=$(awk '$2 == "binder" { print $1; exit }' "$PROC_DEVICES" 2>/dev/null || true)
+  [ -n "$major" ] || die "could not find binder major in $PROC_DEVICES"
+  validate_decimal_major "$major"
+  printf '%s\n' "$major"
+}
+
+grant_lxc_allow() {
+  local major="$1"
+
+  validate_decimal_major "$major"
+  case " $GRANTED_MAJORS " in
+    *" $major "*)
+      log "CT$CT_ID already granted binder major $major in this run"
+      return 0
+      ;;
+  esac
+
+  log "granting CT$CT_ID access to binder major $major"
+  run "$LXC_CGROUP" -n "$CT_ID" devices.allow "c $major:* rwm"
+  GRANTED_MAJORS="$GRANTED_MAJORS $major"
+}
+
+allow_line() {
+  printf 'lxc.cgroup2.devices.allow: c %s:* rwm\n' "$1"
+}
+
+state_file() {
+  printf '%s/majors-%s\n' "$STATE_DIR" "$CT_ID"
+}
+
+# Majors this script persisted on earlier runs and has NOT re-persisted this
+# run. Only these are eligible for removal — an allow line the script did not
+# write is never touched.
+stale_majors() {
+  local sf m
+  sf=$(state_file)
+  [ -f "$sf" ] || return 0
+
+  while read -r m; do
+    [ -n "$m" ] || continue
+    [[ "$m" =~ ^[0-9]+$ ]] || continue
+    case " $PERSISTED_MAJORS " in
+      *" $m "*) continue ;;
+    esac
+    printf '%s\n' "$m"
+  done < <(tr -s '[:space:],' '\n' < "$sf")
+}
+
+# Rewrite $LXC_CONFIG so it carries exactly the majors granted this run and no
+# stale ones. The old implementation only ever appended, so every boot left
+# another dead major behind — and a dead dynamic major is not inert: the kernel
+# hands 235/237/511 to some other driver later, and the container would inherit
+# rwm on it.
+persist_lxc_allow() {
+  local major="$1"
+  local sf stale tmp removed=0 added=0 m
+
+  validate_decimal_major "$major"
+  case " $PERSISTED_MAJORS " in
+    *" $major "*) return 0 ;;
+  esac
+  PERSISTED_MAJORS="${PERSISTED_MAJORS:+$PERSISTED_MAJORS }$major"
+
+  sf=$(state_file)
+  stale=$(stale_majors | tr '\n' ' ')
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    for m in $stale; do
+      log "would remove stale binder major $m from $LXC_CONFIG"
+    done
+    if [ -f "$LXC_CONFIG" ] && grep -Fxq "$(allow_line "$major")" "$LXC_CONFIG"; then
+      log "LXC config already contains binder major $major"
+    else
+      log "would add binder major $major to $LXC_CONFIG"
+    fi
+    return 0
+  fi
+
+  [ -f "$LXC_CONFIG" ] || die "LXC config not found: $LXC_CONFIG"
+  mkdir -p "$STATE_DIR"
+
+  tmp=$(mktemp "$STATE_DIR/lxc-config.XXXXXX")
+  cp "$LXC_CONFIG" "$tmp"
+
+  for m in $stale; do
+    if grep -Fxq "$(allow_line "$m")" "$tmp"; then
+      grep -Fxv "$(allow_line "$m")" "$tmp" > "$tmp.new" || true
+      mv "$tmp.new" "$tmp"
+      log "removing stale binder major $m from $LXC_CONFIG"
+      removed=1
+    fi
+  done
+
+  if ! grep -Fxq "$(allow_line "$major")" "$tmp"; then
+    allow_line "$major" >> "$tmp"
+    added=1
+  fi
+
+  if [ "$removed" -eq 1 ] || [ "$added" -eq 1 ]; then
+    cp -a "$LXC_CONFIG" "$STATE_DIR/$CT_ID.conf.bak-$(date -u +%Y%m%d%H%M%S)"
+    # pmxcfs does not support rename-into-place from another filesystem, so
+    # overwrite in a single write and keep the backup above as the undo.
+    cat "$tmp" > "$LXC_CONFIG"
+    log "persisted binder major $major in $LXC_CONFIG"
+  else
+    log "LXC config already contains binder major $major"
+  fi
+
+  rm -f "$tmp" "$tmp.new"
+  printf '%s\n' $PERSISTED_MAJORS > "$sf"
+}
+
+wait_until "CT$CT_ID running" ct_is_running
+wait_until "Docker in CT$CT_ID" docker_is_ready
+
+if [ "$START_CONTAINER" -eq 1 ]; then
+  PRESTART_MAJOR=$(kernel_binder_major)
+  grant_lxc_allow "$PRESTART_MAJOR"
+  persist_lxc_allow "$PRESTART_MAJOR"
+
+  log "starting container $CONTAINER in CT$CT_ID"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    run "$PCT" exec "$CT_ID" -- docker start "$CONTAINER"
+  else
+    "$PCT" exec "$CT_ID" -- docker start "$CONTAINER" >/dev/null
+  fi
+fi
+
+CONTAINER_ID=""
+deadline=$((SECONDS + WAIT_SECONDS))
+while [ -z "$CONTAINER_ID" ]; do
+  CONTAINER_ID=$(get_container_id || true)
+  if [ -n "$CONTAINER_ID" ]; then
+    break
+  fi
+  if [ "$WAIT" -ne 1 ] || [ "$SECONDS" -ge "$deadline" ]; then
+    die "could not inspect Docker container $CONTAINER in CT$CT_ID"
+  fi
+  sleep 1
+done
+
+SCOPE=""
+deadline=$((SECONDS + WAIT_SECONDS))
+while [ -z "$SCOPE" ]; do
+  SCOPE=$(find_scope "$CONTAINER_ID" || true)
+  if [ -n "$SCOPE" ]; then
+    break
+  fi
+  if [ "$WAIT" -ne 1 ] || [ "$SECONDS" -ge "$deadline" ]; then
+    die "could not find cgroup scope for container $CONTAINER ($CONTAINER_ID)"
+  fi
+  sleep 1
+done
+
+HOST_PID=$(read_scope_pid "$SCOPE" || true)
+[ -n "$HOST_PID" ] || die "could not find host PID from $SCOPE/cgroup.procs"
+
+BINDERFS="$PROC_ROOT/$HOST_PID/root/dev/binderfs"
+BCTL="$BINDERFS/binder-control"
+BINDER="$BINDERFS/binder"
+HWBINDER="$BINDERFS/hwbinder"
+VNDBINDER="$BINDERFS/vndbinder"
+
+wait_until "binder-control in $CONTAINER" path_is_ready "$BCTL"
+invoke_binder_alloc "$BCTL"
+
+wait_until "binder device in $CONTAINER" path_is_ready "$BINDER"
+wait_until "hwbinder device in $CONTAINER" path_is_ready "$HWBINDER"
+wait_until "vndbinder device in $CONTAINER" path_is_ready "$VNDBINDER"
+
+MAJOR=$(binder_major "$BINDER")
+grant_lxc_allow "$MAJOR"
+persist_lxc_allow "$MAJOR"
+
+run chmod 666 "$BINDER" "$HWBINDER" "$VNDBINDER"
+log "Binder devices ready in $CONTAINER (CT$CT_ID, binder major $MAJOR)"

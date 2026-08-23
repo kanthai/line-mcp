@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """LINE MCP server.
 
-Exposes read-only tools over the LINE data mirror (Postgres on CT101, via line-sync-postgres).
-Media decryption still reads from the live Redroid SQLite DB for CDN token auth.
+Exposes read-only tools over the LINE data (Postgres mirror via tools/line_sync_postgres.py,
+or the live Redroid SQLite files — see tools/line_db.py). Media download/decryption uses the
+CDN token cached by tools/refresh_token.py. Streamable HTTP on :8765, Bearer auth.
 """
 
 from __future__ import annotations
@@ -221,7 +222,7 @@ def summarize_recent_activity_tool(
         messages_per_chat=_limit(messages_per_chat, default=24, maximum=100),
     )
     activities = _to_dicts(result["activities"])
-    return {
+    response = {
         "since_ms": result["since_ms"],
         "hours": result["hours"],
         "chat_count": result["chat_count"],
@@ -229,6 +230,7 @@ def summarize_recent_activity_tool(
             "hours": result["hours"],
             "chat_limit": _limit(chat_limit, default=30, maximum=100),
             "messages_per_chat": _limit(messages_per_chat, default=24, maximum=100),
+            "response_compacted": False,
         },
         "source_chat_names": [activity.get("chat_name", "") for activity in activities],
         "summary_rules": [
@@ -243,6 +245,47 @@ def summarize_recent_activity_tool(
             for chat_id, messages in result["messages_by_chat"].items()
         },
     }
+    return _compact_activity_response(response)
+
+
+# Keep summarize_recent_activity answers small enough for remote agents' context windows.
+_MAX_RESPONSE_CHARS = max(10_000, int(os.environ.get("LINE_MCP_MAX_RESPONSE_CHARS", "60000")))
+_COMPACT_STEPS = (  # (messages per chat, max text chars) — applied in order until it fits
+    (8, 280),
+    (8, 120),
+    (4, 80),
+    (2, 40),
+)
+
+
+def _truncate(text: Any, limit: int) -> Any:
+    if isinstance(text, str) and len(text) > limit:
+        return text[: max(0, limit - 3)] + "..."
+    return text
+
+
+def _compact_activity_response(response: dict[str, Any]) -> dict[str, Any]:
+    def size() -> int:
+        return len(json.dumps(response, ensure_ascii=False))
+
+    if size() <= _MAX_RESPONSE_CHARS:
+        return response
+    for per_chat, max_chars in _COMPACT_STEPS:
+        response["messages_by_chat"] = {
+            chat_id: [
+                {**m, "text": _truncate(m.get("text"), max_chars)} for m in messages[-per_chat:]
+            ]
+            for chat_id, messages in response["messages_by_chat"].items()
+        }
+        for activity in response["activities"]:
+            if "latest_text" in activity:
+                activity["latest_text"] = _truncate(activity["latest_text"], max_chars)
+        response["source_limits"]["response_compacted"] = True
+        response["source_limits"]["messages_per_chat_returned"] = per_chat
+        response["source_limits"]["text_chars"] = max_chars
+        if size() <= _MAX_RESPONSE_CHARS:
+            break
+    return response
 
 
 @server.tool(name="get_chat_summary")
@@ -556,7 +599,10 @@ class _BearerAuthMiddleware:
 
 
 MEDIA_DIR = Path.home() / "Downloads" / "line-media"
-MEDIA_BASE_URL = os.environ.get("LINE_MCP_MEDIA_URL", "http://11.0.0.13:8765/files")
+# Base URL clients can use to fetch downloaded media (Bearer-protected /files mount).
+# Set LINE_MCP_MEDIA_URL to this host's LAN address; image tools also inline base64 `data`,
+# so a wrong URL only affects the optional `url` field.
+MEDIA_BASE_URL = os.environ.get("LINE_MCP_MEDIA_URL", "http://127.0.0.1:8765/files")
 
 
 def main() -> None:

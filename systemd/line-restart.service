@@ -1,0 +1,8 @@
+[Unit]
+Description=Nightly restart of the LINE Android app to reclaim leaked native heap
+After=line-mcp.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/line-nightly-restart.sh

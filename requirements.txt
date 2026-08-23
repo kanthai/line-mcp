@@ -1,5 +1,9 @@
-cryptography
-requests
-mcp[cli]
-psycopg[binary]
-psycopg-pool
+# Pinned to the versions running on CT103 (2026-08-23). `pip install -r requirements.txt`
+cryptography==48.0.0
+requests==2.34.2
+mcp[cli]==1.27.1
+psycopg[binary]==3.3.4
+psycopg-pool==3.3.1
+# Optional — text extraction for PDF/DOCX attachments (tools degrade gracefully without them):
+#pymupdf
+#python-docx

@@ -1,10 +1,14 @@
 """
 LINE data read path.
 
-Primary read path (deployed): LINE_MCP_DB_MODE=postgres — queries the
-line_raw/cdb schemas on PostgreSQL (CT101:5432), populated every 5 s by
-line-sync-postgres. Fallback paths: direct SQLite read from host filesystem,
-or waydroid shell sqlite3 for legacy setups.
+Read paths, selected by LINE_MCP_DB_MODE:
+  postgres — the line_raw/cdb mirror on PostgreSQL, kept fresh by
+             tools/line_sync_postgres.py (what CT103 runs; many concurrent readers,
+             unprivileged server process).
+  direct   — the live SQLite files inside the Redroid data volume (needs read access
+             to /var/lib/docker/...; simplest single-host setup).
+  auto     — postgres when DATABASE_URL is set (falls back to direct on error).
+  waydroid — legacy: `sudo waydroid shell sqlite3` on a Waydroid host.
 
 Note: media auth/decryption (download_media, pull_message_image, etc.) still
 reads OBS_ENCRYPTED_ACCESS_TOKEN from the live Redroid SQLite DB — intentional,
@@ -41,19 +45,18 @@ log = logging.getLogger(__name__)
 
 CONTAINER_DB = "/data/data/jp.naver.line.android/databases/naver_line"
 CONTACT_DB  = "/data/data/jp.naver.line.android/databases/contact"
-HOST_DB = Path(os.environ.get(
-    "LINE_MCP_HOST_DB",
-    str(Path.home() / ".local/share/waydroid/data/data/jp.naver.line.android/databases/naver_line"),
-))
-HOST_CONTACT_DB = Path(os.environ.get(
-    "LINE_MCP_HOST_CONTACT_DB",
-    str(Path.home() / ".local/share/waydroid/data/data/jp.naver.line.android/databases/contact"),
-))
+# Live LINE SQLite files as seen from the LXC host. Default = the Redroid Docker volume
+# (redroid-data) used on CT103; override for other layouts (e.g. a Waydroid host).
+_REDROID_DB_DIR = "/var/lib/docker/volumes/redroid-data/_data/data/jp.naver.line.android/databases"
+HOST_DB = Path(os.environ.get("LINE_MCP_HOST_DB", f"{_REDROID_DB_DIR}/naver_line"))
+HOST_CONTACT_DB = Path(os.environ.get("LINE_MCP_HOST_CONTACT_DB", f"{_REDROID_DB_DIR}/contact"))
 
 # ── E2EE CDN auth ─────────────────────────────────────────────────────────────
 _AUTH_FILE = Path.home() / ".config" / "line-mcp" / "auth.json"
 _CDN_BASE  = os.environ.get("LINE_CDN_BASE", "https://obs-th.line-apps.com/r/talk")
 _LINE_APP  = "ANDROIDSECONDARY\t26.5.0\tAndroid OS\t13"
+# User-Agent sent to the OBS CDN. Deliberately left as the value that has been accepted in
+# production since the Waydroid era — the CDN does not check it against the real device.
 _UA        = "Dalvik/2.1.0 (Linux; U; Android 13; WayDroid arm64 only Device Build/TQ3A.230901.001)"
 
 

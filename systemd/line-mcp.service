@@ -1,0 +1,14 @@
+[Unit]
+Description=LINE MCP server (streamable HTTP on :8765)
+After=network.target docker.service
+
+[Service]
+User=line
+WorkingDirectory=/home/line/line-mcp/mcp
+EnvironmentFile=/etc/line-mcp/line-mcp.env
+ExecStart=/home/line/line-mcp/venv/bin/python3 server.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

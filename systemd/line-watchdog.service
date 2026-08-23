@@ -1,8 +1,11 @@
 [Unit]
-Description=LINE process watchdog
+Description=LINE watchdog — Redroid health, LINE foreground, MCP health
+After=line-mcp.service
 
 [Service]
 Type=oneshot
+User=line
+EnvironmentFile=/etc/line-mcp/line-mcp.env
 ExecStart=/usr/local/bin/line-watchdog.sh
 StandardOutput=journal
 StandardError=journal

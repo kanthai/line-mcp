@@ -2,9 +2,13 @@
 Description=Periodically refresh LINE CDN auth token
 
 [Timer]
-OnBootSec=5min
-OnUnitActiveSec=6h
-Unit=line-token-refresh.service
+# OnCalendar (not OnBootSec/OnUnitActiveSec): monotonic-only triggers can end up
+# "elapsed / Trigger: n/a" after a host migration and never fire again.
+# LINE rotates the OBS token reactively every ~4 days; a 30-min poll keeps the
+# window of failing CDN downloads short.
+OnCalendar=*:0/30
+Persistent=true
+AccuracySec=1min
 
 [Install]
 WantedBy=timers.target

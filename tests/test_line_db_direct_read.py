@@ -50,7 +50,7 @@ def test_q_auto_falls_back_to_waydroid_when_direct_read_fails(monkeypatch):
     waydroid.assert_called_once_with("SELECT 1 AS ok", attach_contact=False)
 
 
-def test_pull_message_image_returns_direct_download_error_when_cache_fallback_is_empty(monkeypatch, tmp_path):
+def test_pull_message_image_reports_cdn_failure_without_ui_fallback(monkeypatch, tmp_path):
     media = SimpleNamespace(
         message_id=1,
         chat_id="chatA",
@@ -69,6 +69,9 @@ def test_pull_message_image_returns_direct_download_error_when_cache_fallback_is
 
     result = line_db.pull_message_image(1, destination_dir=str(tmp_path))
 
-    assert result["downloaded_files"] == []
-    assert result["cache_files"] == []
-    assert result["direct_error"] == "cdn failed"
+    # pull_message_image never opens the LINE UI itself: a CDN failure is reported as
+    # status=cdn_failed with the error and a hint to call open_chat_and_cache explicitly.
+    assert result["status"] == "cdn_failed"
+    assert result["error"] == "cdn failed"
+    assert "open_chat_and_cache" in result["hint"]
+    assert "downloaded_files" not in result

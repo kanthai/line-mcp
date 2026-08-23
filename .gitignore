@@ -1,30 +1,31 @@
 __pycache__/
 *.pyc
 *.pyo
+venv/
+.venv/
+.pytest_cache/
+
+# Downloaded / decrypted media and blobs — never commit
+media/
 *.bin
 *.jpg
 *.jpeg
 *.png
 *.mp4
 *.m4a
-media/
-frida/
 
-# Auth token — never commit
+# Secrets — never commit
 auth.json
 .env
+*.env
+!config/line-mcp.env.example
 
-# Personal research scripts with key material
+# Research leftovers from the Waydroid/Frida era (see docs/history.md)
+frida/
+tools/frida_*.py
 tools/e2ee_decrypt.py
-tools/frida_find_x25519.py
-tools/frida_keystore_dump.py
-tools/frida_mint_key.py
-tools/frida_startup_keys.py
-tools/frida_letter_sealing.py
+tools/frida-server-*
 
 # IDE
 .vscode/
 .idea/
-tools/frida-server-linux-arm64
-RUNBOOK.md
-tools/frida_*.py

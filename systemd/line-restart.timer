@@ -1,0 +1,9 @@
+[Unit]
+Description=Run nightly LINE restart at 21:00 UTC (04:00 Asia/Bangkok)
+
+[Timer]
+OnCalendar=*-*-* 21:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

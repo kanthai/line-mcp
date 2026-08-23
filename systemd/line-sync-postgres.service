@@ -1,0 +1,16 @@
+[Unit]
+Description=Mirror Redroid LINE SQLite tables into PostgreSQL (line_raw / cdb schemas)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+# Root for the same reason as line-token-refresh.service (traversing /var/lib/docker).
+User=root
+WorkingDirectory=/home/line/line-mcp
+EnvironmentFile=/etc/line-mcp/line-mcp.env
+ExecStart=/home/line/line-mcp/venv/bin/python3 /home/line/line-mcp/tools/line_sync_postgres.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

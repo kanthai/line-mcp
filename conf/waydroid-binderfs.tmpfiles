@@ -1,2 +1,0 @@
-# Create /dev/binderfs mount point on boot (/dev is tmpfs, cleared each boot)
-d /dev/binderfs 0755 root root - -

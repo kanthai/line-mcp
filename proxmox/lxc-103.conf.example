@@ -1,0 +1,20 @@
+# /etc/pve/lxc/103.conf on the Proxmox host — the CT103 ("android") container as deployed.
+# Create the CT with the PVE UI/`pct create` first; the lines that matter for Redroid are
+# marked ►. Adjust CT id, storage and network to your environment.
+arch: amd64
+cores: 4
+►dev0: /dev/dri/renderD128
+►features: nesting=1,keyctl=1
+hostname: android
+memory: 6144
+nameserver: 11.0.0.1
+net0: name=eth0,bridge=vmbr0,gw=11.0.0.1,hwaddr=BC:24:11:EB:22:7B,ip=11.0.0.103/24,type=veth
+onboot: 1
+ostype: debian
+rootfs: local-zfs:subvol-103-disk-0,size=60G
+swap: 0
+# ► Written and pruned automatically by redroid-binder-alloc (current binder major, see
+#   `grep binder /proc/devices`). Do NOT add lxc.mount.entry lines for binder devices —
+#   bind-mounting host nodes makes Docker inject them as real char devices and Android
+#   hits ENXIO. Do not keep stale majors: the kernel re-uses them for other drivers later.
+lxc.cgroup2.devices.allow: c 235:* rwm

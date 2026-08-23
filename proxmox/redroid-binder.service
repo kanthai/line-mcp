@@ -1,0 +1,14 @@
+[Unit]
+Description=Start Redroid with dynamic Binder cgroup allow in CT103
+After=pve-guests.service
+Requires=pve-guests.service
+Documentation=https://github.com/kanthai/line-mcp/blob/main/proxmox/README.md
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/redroid-binder-alloc --start-container redroid 103
+RemainAfterExit=yes
+TimeoutStartSec=600
+
+[Install]
+WantedBy=multi-user.target

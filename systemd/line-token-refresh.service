@@ -1,8 +1,19 @@
 [Unit]
-Description=Refresh LINE CDN auth token from SQLite DB
-After=waydroid-watchdog.service
-Wants=waydroid-watchdog.service
+Description=Refresh LINE CDN auth token from the live LINE SQLite DB
+After=line-mcp.service
 
 [Service]
 Type=oneshot
-ExecStart=/home/kanthai/line-mcp/tools/line-token-refresh.sh
+# Runs as root: Docker resets /var/lib/docker to 0710 on every daemon start, so the
+# `line` user cannot traverse to the SQLite file. HOME keeps auth.json under /home/line
+# where line-mcp.service (User=line) reads it.
+User=root
+Environment=HOME=/home/line
+WorkingDirectory=/home/line/line-mcp
+EnvironmentFile=/etc/line-mcp/line-mcp.env
+# The token MUST come from the live SQLite file even when the read path is postgres.
+Environment=LINE_TOKEN_REFRESH_DB_MODE=direct
+ExecStart=/home/line/line-mcp/venv/bin/python3 /home/line/line-mcp/tools/refresh_token.py
+ExecStartPost=-/bin/sh -c 'chown line:line /home/line/.config/line-mcp/auth.json && chmod 600 /home/line/.config/line-mcp/auth.json'
+StandardOutput=journal
+StandardError=journal

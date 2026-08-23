@@ -1,0 +1,11 @@
+[Unit]
+Description=Redroid lmkd watchdog — clear the epoll_wait EINVAL busy-spin
+After=line-mcp.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+User=line
+ExecStart=/usr/local/bin/redroid-lmkd-watchdog.sh
+StandardOutput=journal
+StandardError=journal

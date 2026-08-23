@@ -1,9 +1,10 @@
 [Unit]
-Description=Run LINE process watchdog every 5 minutes
+Description=LINE watchdog — run every 2 minutes
 
 [Timer]
-OnBootSec=3min
-OnUnitActiveSec=5min
+OnBootSec=2min
+OnUnitActiveSec=2min
+AccuracySec=30s
 
 [Install]
 WantedBy=timers.target
