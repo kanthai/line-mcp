@@ -91,6 +91,12 @@ rotates it reactively roughly every 4 days, so `line-token-refresh.timer` copies
 
 Each script prints what to do next. All of them are idempotent.
 
+> Dry-run 2026-08-23: steps 0 → 1 → 2 → 4 → 5 were executed end-to-end on a throwaway
+> privileged CT (Debian 12 template, 2 cores / 3 GB) on the same Proxmox host: binder granted
+> and allocated on a brand-new container, Android 12 booted, ADB connected, units/timers up,
+> `/health` + 401/406 + MCP session OK. Only the LINE-dependent checks (app running, DB,
+> CDN token, `list_chats` data) need the manual QR login in step 3.
+
 ```bash
 # 0. Proxmox HOST — binder module, binder_alloc, redroid-binder.service, LXC features
 git clone https://github.com/kanthai/line-mcp.git && cd line-mcp

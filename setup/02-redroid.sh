@@ -62,7 +62,5 @@ $ADB shell settings put global adaptive_battery_management_enabled 0
 $ADB shell settings put global device_idle_enabled 0
 $ADB shell settings put global app_standby_enabled 0
 $ADB shell settings put global low_power 0
-# Cosmetic: Redroid polls a WiFi HAL forever; short-circuit it.
-$ADB shell setprop wlan.driver.status failed || true
 
 echo "done. Next: install + log in to LINE — see setup/03-line-login.md"

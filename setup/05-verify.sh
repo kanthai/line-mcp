@@ -39,7 +39,7 @@ C=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -H "Authorization: Beare
 
 # live tool call through the MCP protocol
 if [ -n "${LINE_MCP_API_KEY:-}" ] && command -v python3 >/dev/null; then
-  python3 - "$LINE_MCP_API_KEY" <<'PY' && ok "MCP list_chats round-trip" || bad "MCP tool call failed"
+  python3 - "$LINE_MCP_API_KEY" <<'PY' 2>/tmp/.lm-verify-err && ok "MCP list_chats round-trip" || bad "MCP list_chats failed: $(tail -c 200 /tmp/.lm-verify-err | tr '\n' ' ')"
 import json, sys, urllib.request
 key = sys.argv[1]; url = "http://127.0.0.1:8765/mcp"
 H = {"Authorization": f"Bearer {key}", "Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
@@ -51,7 +51,11 @@ def post(body, sid=None):
 sid, _ = post({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"verify","version":"0"}}})
 post({"jsonrpc":"2.0","method":"notifications/initialized"}, sid)
 _, out = post({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_chats","arguments":{"limit":1}}}, sid)
-assert '"result"' in out and '"isError": true' not in out, out[:300]
+# streamable HTTP answers as SSE: pick the data: line and parse it
+payload = next((l[5:].strip() for l in out.splitlines() if l.startswith("data:")), out)
+msg = json.loads(payload)
+res = msg.get("result") or {}
+assert "error" not in msg and not res.get("isError"), (res.get("content") or msg)[:1]
 PY
 fi
 exit $RC
