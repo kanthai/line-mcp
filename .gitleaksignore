@@ -1,0 +1,6 @@
+# Historical leaks in commit 2dcfad6 (2026-05, pre-cleanup). That commit is already public and
+# cannot be un-published; the only fix is rotating those values (owner's task). Do not add new
+# entries here — fix the code instead.
+2dcfad62967f0eaaaf8c0b63349f23d33fbc0b72:systemd/line-mcp-sse.service:generic-api-key:13
+2dcfad62967f0eaaaf8c0b63349f23d33fbc0b72:systemd/line-triage.service:telegram-bot-api-token:8
+2dcfad62967f0eaaaf8c0b63349f23d33fbc0b72:systemd/line-triage-digest.service:telegram-bot-api-token:8

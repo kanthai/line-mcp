@@ -7,7 +7,7 @@ export DEBIAN_FRONTEND=noninteractive
 
 echo "== base packages"
 apt-get update -q
-apt-get install -y -q ca-certificates curl gnupg git sqlite3 python3 python3-venv python3-pip adb acl jq
+apt-get install -y -q ca-certificates curl gnupg git rsync sudo sqlite3 python3 python3-venv python3-pip adb acl jq
 
 echo "== Docker CE (official repo)"
 if ! command -v docker >/dev/null; then
