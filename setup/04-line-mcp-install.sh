@@ -52,7 +52,10 @@ if [ -d "$DBDIR" ]; then
   G=$(stat -c %g "$DBDIR")
   getent group "$G" >/dev/null || groupadd -g "$G" android_line
   usermod -aG "$G" line
-  echo "   line added to gid $G ($(getent group "$G" | cut -d: -f1)); re-login not needed for systemd services"
+  # Android creates the app data dir 0700 — let the app group traverse/list it (sticks; CT103 has run this way since 2026-05)
+  chmod g+rx "$(dirname "$DBDIR")"
+  echo "   line added to gid $G ($(getent group "$G" | cut -d: -f1)); app dir g+rx; restart line-mcp to pick up the new group"
+  systemctl is-active line-mcp.service >/dev/null 2>&1 && systemctl restart line-mcp.service
 else
   echo "   LINE DB dir not found yet ($DBDIR) — log in to LINE (setup/03) and re-run this script"
 fi

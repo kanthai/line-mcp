@@ -61,6 +61,7 @@ rotates it reactively roughly every 4 days, so `line-token-refresh.timer` copies
 | `tools/refresh_token.py` | CDN token refresh (SQLite read; ADB-driven chat open when the token is null) |
 | `tools/line_sync_postgres.py` | SQLite → PostgreSQL mirror (for `LINE_MCP_DB_MODE=postgres`) |
 | `tools/decrypt_media.py` | offline CLI: decrypt a raw CDN blob with a known KM |
+| `tools/redroid-screen.py` | stdlib web viewer/controller for the headless Android screen (no VNC/scrcpy on this image) — used for the LINE QR login |
 | `config/line-mcp.env.example` | all environment variables, documented → `/etc/line-mcp/line-mcp.env` |
 | `systemd/` | LXC units + timers exactly as deployed on CT103 |
 | `scripts/` | helper scripts the units call (`/usr/local/bin`) |
@@ -68,6 +69,7 @@ rotates it reactively roughly every 4 days, so `line-token-refresh.timer` copies
 | `setup/00…05` | step-by-step install scripts + LINE login guide |
 | `RUNBOOK.md` | day-2 operations: status, recovery, known failure modes |
 | `docs/history.md` | Waydroid/DGX-Spark → TrueNAS VM → Redroid/CT103 lineage, and where the old scripts went |
+| `docs/dry-run-2026-08-23.md` | full transcript of a from-scratch rebuild on a throwaway CT (both read paths) |
 | `tests/` | unit tests (`pytest`) |
 
 ---
@@ -81,7 +83,8 @@ rotates it reactively roughly every 4 days, so `line-token-refresh.timer` copies
   `features: nesting=1,keyctl=1`, ≥4 GB RAM (CT103: 4 cores / 6 GB / 60 GB, swap 0, optional
   `/dev/dri/renderD128` passthrough), static IP.
 - Inside the LXC: Docker CE, `adb`, `sqlite3`, Python 3.11 (`setup/01-lxc-base.sh` installs them).
-- **LINE APK** (x86_64 build; CT103 runs 26.7.1) — source it yourself, it is not distributed here.
+- **LINE APK** — CT103 runs 26.7.1, the **arm64-v8a** build (Redroid `_64only` runs it through its
+  native bridge); pull the splits from an existing install or source it yourself — not distributed here.
 - A phone with the LINE account, to scan the login QR once.
 - Optional: a PostgreSQL 14+ server for the mirror read path (`pg_trgm` extension).
 
@@ -91,11 +94,13 @@ rotates it reactively roughly every 4 days, so `line-token-refresh.timer` copies
 
 Each script prints what to do next. All of them are idempotent.
 
-> Dry-run 2026-08-23: steps 0 → 1 → 2 → 4 → 5 were executed end-to-end on a throwaway
-> privileged CT (Debian 12 template, 2 cores / 3 GB) on the same Proxmox host: binder granted
-> and allocated on a brand-new container, Android 12 booted, ADB connected, units/timers up,
-> `/health` + 401/406 + MCP session OK. Only the LINE-dependent checks (app running, DB,
-> CDN token, `list_chats` data) need the manual QR login in step 3.
+> Dry-run 2026-08-23 (full log: `docs/dry-run-2026-08-23.md`): every step 0 → 5 was executed
+> on a throwaway privileged CT and then destroyed — binder allocated on a brand-new container,
+> Android 12 booted, LINE (arm64 splits) installed, the QR login screen driven via
+> `tools/redroid-screen.py`, and **both read paths verified with real data** (a read-only
+> snapshot of CT103's DB stood in for a live scan): `direct` SQLite and `postgres` (mirror +
+> live `line-sync-postgres.service`) each returned real `list_chats`/`search_messages` results
+> through MCP. Only the CDN-token step needs a real QR scan.
 
 ```bash
 # 0. Proxmox HOST — binder module, binder_alloc, redroid-binder.service, LXC features
@@ -113,6 +118,7 @@ systemctl start redroid-binder.service && journalctl -u redroid-binder.service -
 pct exec 103 -- bash /root/line-mcp/setup/02-redroid.sh
 
 # 3. install LINE + QR login (manual, ~5 min) — follow setup/03-line-login.md
+#    (python3 tools/redroid-screen.py → http://<lxc-ip>:6080/ shows the screen, click = tap)
 
 # 4. inside the LXC — line-mcp venv, env file, units, timers
 pct exec 103 -- bash /root/line-mcp/setup/04-line-mcp-install.sh          # direct SQLite mode
@@ -141,6 +147,12 @@ mcp_servers:
 | data source | live SQLite files in the `redroid-data` volume | `line_raw`/`cdb` schemas mirrored by `line-sync-postgres.service` (≤30 s lag) |
 | needs | the server process to open `/var/lib/docker/volumes/...` | a PostgreSQL server + `DATABASE_URL` |
 | why | zero extra infra | unprivileged `line` service user, many concurrent readers, trigram search index, agents on other hosts can query the mirror |
+
+> **Live-DB caveat for `direct` mode:** LINE keeps `naver_line`/`contact` in SQLite **WAL**
+> mode with a `0600` `-shm` sidecar, so an unprivileged read-only open of the *live, actively
+> written* DB can fail (`attempt to write a readonly database`). Direct mode is reliable
+> against a static snapshot or a single low-traffic reader; for the live multi-reader case use
+> `postgres` mode — which is why CT103 runs it.
 
 Docker resets `/var/lib/docker` to `0710 root:root` on every daemon start, so a non-root
 server cannot traverse to the SQLite files. For `direct` mode `setup/04-line-mcp-install.sh`

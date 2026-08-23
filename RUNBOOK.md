@@ -92,7 +92,9 @@ bash setup/02-redroid.sh                          # recreate → host: systemctl
 ## 3. Manual operations
 
 ```bash
-# screenshot (no VNC/scrcpy on the _64only image)
+# live screen in a browser (no VNC/scrcpy on the _64only image): click=tap, drag=swipe
+python3 /home/line/line-mcp/tools/redroid-screen.py --port 6080     # http://<lxc-ip>:6080/
+# one-off screenshot
 adb -s 127.0.0.1:5555 exec-out screencap -p > /tmp/screen.png
 # UI hierarchy
 adb -s 127.0.0.1:5555 shell uiautomator dump /sdcard/ui.xml && adb -s 127.0.0.1:5555 shell cat /sdcard/ui.xml

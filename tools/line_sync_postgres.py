@@ -59,6 +59,19 @@ INCREMENTAL_TABLES = [
 
 RESCAN_HOURS = 24  # LINE allows message recall within 24h; rescan this window for in-place updates
 
+# Natural keys per raw table. The SQLite source declares no PRIMARY KEY on most of these
+# (only contacts.mid and chat_history.id are real SQLite PKs), so the mirror must create the
+# unique constraint itself — both to upsert in place (not insert-once) and so ON CONFLICT has a
+# matching index. Matches the constraints on the CT101 production mirror.
+CONFLICT_KEYS = {
+    "chat": ["chat_id"],
+    "chat_member": ["chat_id", "mid"],
+    "groups": ["id"],
+    "membership": ["id", "m_id"],
+    "contacts": ["mid"],
+    "chat_history": ["id"],
+}
+
 # SQLite declares these as TEXT/INTEGER inconsistently; line-mcp's queries need them as BIGINT.
 _BIGINT_COLUMNS = {"created_time", "last_created_time", "delivered_time", "last_message_display_time"}
 
@@ -149,6 +162,12 @@ def create_raw_table(cur, schema: str, table: str, cols: list[sqlite3.Row]):
     if pk_cols:
         definitions.append("PRIMARY KEY (" + ", ".join(qident(c) for c in pk_cols) + ")")
     cur.execute(f"CREATE TABLE IF NOT EXISTS {qident(schema)}.{qident(table)} ({', '.join(definitions)})")
+    # If SQLite declared no PK, back the ON CONFLICT target with a unique index (idempotent).
+    keys = CONFLICT_KEYS.get(table)
+    if not pk_cols and keys and all(c in {col["name"] for col in cols} for c in keys):
+        idx = f"{table}_conflict_key"
+        cols_sql = ", ".join(qident(c) for c in keys)
+        cur.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS {qident(idx)} ON {qident(schema)}.{qident(table)} ({cols_sql})")
 
 
 def upsert_rows(cur, schema: str, table: str, columns: list[str], rows: list[dict], conflict_cols: list[str] | None = None):
@@ -188,7 +207,7 @@ def sync_table(cur, schema: str, path: Path, table: str) -> int:
     create_raw_table(cur, schema, table, cols_info)
     cols, rows = sqlite_rows(path, table)
     pk_cols = [c["name"] for c in cols_info if c["pk"]]
-    conflict_cols = pk_cols or (["chat_id", "mid"] if table == "chat_member" else None)
+    conflict_cols = pk_cols or CONFLICT_KEYS.get(table)
     return upsert_rows(cur, schema, table, cols, rows, conflict_cols)
 
 
