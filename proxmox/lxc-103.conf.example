@@ -1,6 +1,6 @@
 # /etc/pve/lxc/103.conf on the Proxmox host — the CT103 ("android") container as deployed.
-# Create the CT with the PVE UI/`pct create` first; the lines that matter for Redroid are
-# marked ►. Adjust CT id, storage and network to your environment.
+# Create the CT with the PVE UI/`pct create` first — **privileged** (no `unprivileged: 1` line;
+# Redroid needs --privileged Docker + binderfs). The lines that matter for Redroid are marked ►. Adjust CT id, storage and network to your environment.
 arch: amd64
 cores: 4
 ►dev0: /dev/dri/renderD128

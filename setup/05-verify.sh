@@ -8,6 +8,7 @@ bad(){ printf '  \e[31mFAIL\e[0m %s\n' "$*"; RC=1; }
 RC=0
 # shellcheck disable=SC1090
 [ -r "$ENV_FILE" ] && set -a && . "$ENV_FILE" && set +a
+[ "$(id -u)" -eq 0 ] || echo "(run as root for the full check — $ENV_FILE is 0600, so key-based tests will fail otherwise)"
 
 echo "Redroid"
 docker inspect --format '{{.State.Running}}' redroid 2>/dev/null | grep -q true && ok "container running" || bad "container not running (host: systemctl start redroid-binder.service)"
@@ -18,7 +19,10 @@ $ADB shell ps -A 2>/dev/null | grep -q jp.naver.line.android && ok "LINE process
 DB="${LINE_MCP_HOST_DB:-/var/lib/docker/volumes/redroid-data/_data/data/jp.naver.line.android/databases/naver_line}"
 [ -e "$DB" ] && ok "LINE DB exists" || bad "LINE DB missing at $DB (not logged in?)"
 if [ "$(id -u)" -eq 0 ] && [ -e "$DB" ]; then
-  N=$(sqlite3 "file:$DB?mode=ro" 'select count(*) from chat' 2>/dev/null) && ok "LINE DB readable: $N chats" || bad "cannot read LINE DB"
+  N=$(sqlite3 "file:$DB?mode=ro" 'select count(*) from chat' 2>/dev/null) && ok "LINE DB readable as root: $N chats" || bad "cannot read LINE DB as root"
+  if [ "${LINE_MCP_DB_MODE:-auto}" != postgres ]; then
+    N=$(sudo -u line sqlite3 "file:$DB?mode=ro" 'select count(*) from chat' 2>/dev/null) && ok "LINE DB readable as line (direct mode): $N chats" || bad "line user cannot read LINE DB — rerun setup/04 (docker drop-in + app gid), or use postgres mode"
+  fi
 fi
 
 echo "line-mcp"

@@ -38,6 +38,25 @@ else
   echo "   $ENV_FILE exists — left untouched"
 fi
 
+echo "== direct-mode DB access for the line user"
+# shellcheck disable=SC1090
+DBFILE=$(set -a; . "$ENV_FILE"; set +a; echo "${LINE_MCP_HOST_DB:-}")
+DBDIR=$(dirname "${DBFILE:-/var/lib/docker/volumes/redroid-data/_data/data/jp.naver.line.android/databases/naver_line}")
+# 1) traverse /var/lib/docker (Docker resets it to 0710 each start → drop-in re-applies)
+install -d -m 755 /etc/systemd/system/docker.service.d
+install -m 644 "$DEST/systemd/docker.service.d-line-mcp-db-access.conf" /etc/systemd/system/docker.service.d/line-mcp-db-access.conf
+systemctl daemon-reload
+chmod o+x /var/lib/docker
+# 2) membership in the LINE app's Android gid (files are rw-rw---- <appuid>:<appgid>)
+if [ -d "$DBDIR" ]; then
+  G=$(stat -c %g "$DBDIR")
+  getent group "$G" >/dev/null || groupadd -g "$G" android_line
+  usermod -aG "$G" line
+  echo "   line added to gid $G ($(getent group "$G" | cut -d: -f1)); re-login not needed for systemd services"
+else
+  echo "   LINE DB dir not found yet ($DBDIR) — log in to LINE (setup/03) and re-run this script"
+fi
+
 echo "== helper scripts → /usr/local/bin"
 install -m 755 "$DEST"/scripts/line-watchdog.sh "$DEST"/scripts/line-nightly-restart.sh "$DEST"/scripts/redroid-lmkd-watchdog.sh /usr/local/bin/
 

@@ -77,8 +77,9 @@ rotates it reactively roughly every 4 days, so `line-token-refresh.timer` copies
 - **Proxmox VE** host (tested: PVE 9, kernel 7.0.2-6-pve, x86_64) with the `binder_linux`
   module available. Any Linux host with binderfs can work, but the host-side helpers in
   `proxmox/` assume `pct`/`lxc-cgroup`.
-- An LXC: Debian 12, `features: nesting=1,keyctl=1`, ≥4 GB RAM (CT103: 4 cores / 6 GB / 60 GB,
-  swap 0, optional `/dev/dri/renderD128` passthrough), static IP.
+- An LXC: **privileged** (Redroid needs `--privileged` Docker + binderfs), Debian 12,
+  `features: nesting=1,keyctl=1`, ≥4 GB RAM (CT103: 4 cores / 6 GB / 60 GB, swap 0, optional
+  `/dev/dri/renderD128` passthrough), static IP.
 - Inside the LXC: Docker CE, `adb`, `sqlite3`, Python 3.11 (`setup/01-lxc-base.sh` installs them).
 - **LINE APK** (x86_64 build; CT103 runs 26.7.1) — source it yourself, it is not distributed here.
 - A phone with the LINE account, to scan the login QR once.
@@ -136,11 +137,12 @@ mcp_servers:
 | why | zero extra infra | unprivileged `line` service user, many concurrent readers, trigram search index, agents on other hosts can query the mirror |
 
 Docker resets `/var/lib/docker` to `0710 root:root` on every daemon start, so a non-root
-server cannot traverse to the SQLite files. In `direct` mode either run `line-mcp.service`
-as root, or add a `docker.service` drop-in `ExecStartPost=/bin/chmod o+x /var/lib/docker`
-and put `line` in the group that owns the LINE databases (`stat -c %g .../databases`, the
-app's Android gid). `line-token-refresh.service` and `line-sync-postgres.service` run as
-root for exactly this reason (see their unit files).
+server cannot traverse to the SQLite files. For `direct` mode `setup/04-line-mcp-install.sh`
+therefore installs a `docker.service` drop-in (`ExecStartPost=/bin/chmod o+x /var/lib/docker`,
+`systemd/docker.service.d-line-mcp-db-access.conf`) and adds `line` to the LINE app's
+Android gid that owns the database files — verified on CT103 to give the `line` user
+read-only access. `line-token-refresh.service` and `line-sync-postgres.service` run as root
+regardless (CT103 predates the drop-in and runs postgres mode).
 
 ---
 

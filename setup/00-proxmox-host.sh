@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # 00 — Proxmox HOST: binder module + redroid-binder service + LXC features.
-# Run as root ON THE PROXMOX HOST from a checkout of this repo, after the LXC exists
-# (create it with the PVE UI / pct create: Debian 12, ≥4 GB RAM, ≥40 GB disk, unprivileged=0
-# is NOT required — CT103 is a normal CT with nesting+keyctl).
+# Run as root ON THE PROXMOX HOST from a checkout of this repo, after the LXC exists.
+# Create it with the PVE UI / pct create as a **privileged** CT (uncheck "Unprivileged
+# container" / `--unprivileged 0`), Debian 12, ≥4 GB RAM, ≥40 GB disk — that is what CT103 is;
+# Redroid needs --privileged Docker + binderfs, which an unprivileged CT cannot provide.
 #
 #   CT_ID=103 CONTAINER=redroid bash setup/00-proxmox-host.sh
 set -euo pipefail
@@ -13,6 +14,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 [ "$(id -u)" -eq 0 ] || { echo "run as root on the Proxmox host" >&2; exit 1; }
 command -v pct >/dev/null || { echo "pct not found — this must run on the Proxmox host" >&2; exit 1; }
 pct status "$CT_ID" >/dev/null 2>&1 || { echo "CT $CT_ID does not exist yet — create it first" >&2; exit 1; }
+if pct config "$CT_ID" | grep -q '^unprivileged: 1'; then
+  echo "CT $CT_ID is unprivileged — Redroid needs a privileged CT (recreate with --unprivileged 0)" >&2; exit 1
+fi
 
 echo "== binder kernel module"
 install -m 644 "$HERE/proxmox/modules-load.d-binder.conf" /etc/modules-load.d/binder.conf
@@ -47,6 +51,9 @@ systemctl daemon-reload
 systemctl enable redroid-binder.service
 echo "   enabled: $(systemctl is-enabled redroid-binder.service)"
 cat <<MSG
+
+NOTE: feature changes (nesting/keyctl) apply on the next CT start — if CT$CT_ID was already
+running: pct reboot $CT_ID
 
 Host side done. Next, inside the LXC:
    pct exec $CT_ID -- bash       # then run setup/01-lxc-base.sh and setup/02-redroid.sh
